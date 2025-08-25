@@ -12,7 +12,7 @@ model User {
   name      String
   email     String   @unique
   phone     String?
-  password  String    
+  password  String
   verified  Boolean  @default(false)
   role      Role     @default(buyer)
   books     Book[]
@@ -25,56 +25,22 @@ enum Role {
   admin
 }
 
-enum Visibility {
-  PUBLIC
-  PRIVATE
-}
-
-model Asset {
-  id           Int         @id @default(autoincrement())
-  provider     String      @default("s3")
-  bucket       String
-  region       String
-  key          String      @unique
-  cdnDomain    String?
-  mimeType     String
-  size         Int
-  etag         String?
-  visibility   Visibility  @default(PUBLIC)
-
-  width        Int?
-  height       Int?
-  originalName String?
-
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
-
-  // reverse relations (optional)
-  usedAsCover  Book[]      @relation("BookCover")
-  usedAsBack   Book[]      @relation("BookBack")
-
-  @@index([bucket, key])
-}
-
 model Book {
-  id           Int        @id @default(autoincrement())
-  userId       Int
-  title        String
-  language     String
-  authorName   String
-  subheading   String?
-  coAuthor     String?
+  id          Int           @id @default(autoincrement())
+  userId      Int
+  title       String
+  language    String
+  authorName  String
+  subheading  String?
+  coAuthor    String?
+  genre       String?       // ✅ Added genre field
+  chapters    BookChapter[]
+  createdAt   DateTime      @default(now())
 
-  coverImageId Int?
-  coverImage   Asset?     @relation("BookCover", fields: [coverImageId], references: [id])
+  user        User          @relation(fields: [userId], references: [id])
 
-  backImageId  Int?
-  backImage    Asset?     @relation("BookBack", fields: [backImageId], references: [id])
-
-  chapters     BookChapter[]
-  createdAt    DateTime   @default(now())
-
-  user         User       @relation(fields: [userId], references: [id])
+  // 1–1 relation to design settings
+  design      BookDesign?
 }
 
 model BookChapter {
@@ -92,4 +58,59 @@ enum ChapterType {
   chapter
   intro
   preface
+}
+
+/* =========================
+   Book Design enums + model
+   ========================= */
+
+enum BookSize {
+  FIVE_X_EIGHT
+  FIVE_HALF_X_EIGHT_HALF
+  SIX_X_NINE
+  EIGHT_HALF_X_EIGHT_HALF
+  EIGHT_HALF_X_ELEVEN
+  CUSTOM
+}
+
+enum BindingType {
+  PAPERBACK
+  HARDCOVER
+}
+
+enum BookInterior {
+  BLACK_WHITE
+  COLOR
+}
+
+enum PaperType {
+  CREAM
+  WHITE
+  ART_MATTE
+}
+
+enum CoverLamination {
+  MATTE
+  GLOSS
+  NONE
+}
+
+model BookDesign {
+  id               Int            @id @default(autoincrement())
+  bookId           Int            @unique
+
+  size             BookSize
+  bindingType      BindingType
+  interior         BookInterior
+  paperType        PaperType
+  coverLamination  CoverLamination
+
+  // For CUSTOM size (inches)
+  customWidthIn    Decimal?       @db.Decimal(5,2)
+  customHeightIn   Decimal?       @db.Decimal(5,2)
+
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  book             Book           @relation(fields: [bookId], references: [id], onDelete: Cascade)
 }
