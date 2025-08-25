@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  phone     String?
+  password  String    
+  verified  Boolean  @default(false)
+  role      Role     @default(buyer)
+  books     Book[]
+  createdAt DateTime @default(now())
+}
+
+enum Role {
+  author
+  buyer
+  admin
+}
+
+enum Visibility {
+  PUBLIC
+  PRIVATE
+}
+
+model Asset {
+  id           Int         @id @default(autoincrement())
+  provider     String      @default("s3")
+  bucket       String
+  region       String
+  key          String      @unique
+  cdnDomain    String?
+  mimeType     String
+  size         Int
+  etag         String?
+  visibility   Visibility  @default(PUBLIC)
+
+  width        Int?
+  height       Int?
+  originalName String?
+
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  // reverse relations (optional)
+  usedAsCover  Book[]      @relation("BookCover")
+  usedAsBack   Book[]      @relation("BookBack")
+
+  @@index([bucket, key])
+}
+
+model Book {
+  id           Int        @id @default(autoincrement())
+  userId       Int
+  title        String
+  language     String
+  authorName   String
+  subheading   String?
+  coAuthor     String?
+
+  coverImageId Int?
+  coverImage   Asset?     @relation("BookCover", fields: [coverImageId], references: [id])
+
+  backImageId  Int?
+  backImage    Asset?     @relation("BookBack", fields: [backImageId], references: [id])
+
+  chapters     BookChapter[]
+  createdAt    DateTime   @default(now())
+
+  user         User       @relation(fields: [userId], references: [id])
+}
+
+model BookChapter {
+  id          Int       @id @default(autoincrement())
+  bookId      Int
+  title       String
+  type        ChapterType
+  content     String
+  createdAt   DateTime  @default(now())
+
+  book        Book      @relation(fields: [bookId], references: [id])
+}
+
+enum ChapterType {
+  chapter
+  intro
+  preface
+}

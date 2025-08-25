@@ -1,0 +1,5 @@
+docker run --name mysql-nobel \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=nobel_db \
+  -p 3306:3306 \
+  -d mysql:8
