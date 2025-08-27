@@ -25,23 +25,38 @@ enum Role {
   admin
 }
 
-model Book {
-  id          Int           @id @default(autoincrement())
-  userId      Int
-  title       String
-  language    String
-  authorName  String
-  subheading  String?
-  coAuthor    String?
-  genre       String?       // ✅ Added genre field
-  chapters    BookChapter[]
-  createdAt   DateTime      @default(now())
-
-  user        User          @relation(fields: [userId], references: [id])
-
-  // 1–1 relation to design settings
-  design      BookDesign?
+enum BookStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  INACTIVE
 }
+model Book {
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  title         String
+  language      String
+  authorName    String
+  subheading    String?
+  coAuthor      String?
+  genre         String?
+  status        BookStatus @default(DRAFT)
+  chapters      BookChapter[]
+  createdAt     DateTime   @default(now())
+
+  // ✅ add both @default(now()) and @updatedAt
+  updatedAt     DateTime   @default(now()) @updatedAt
+
+  // covers (optional)
+  frontCoverKey String?
+  backCoverKey  String?
+  frontCoverUrl String?
+  backCoverUrl  String?
+
+  user          User       @relation(fields: [userId], references: [id])
+  design        BookDesign?
+}
+
 
 model BookChapter {
   id          Int       @id @default(autoincrement())

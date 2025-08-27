@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { buildObjectKey, getPresignedPutUrl, deleteObjectByKey } from "../services/s3.service";
+import { buildObjectKey, getPresignedPutUrl, deleteObjectByKey, getPresignedGetUrl } from "../services/s3.service";
 
 type PresignBody = {
   fileName?: string;
@@ -28,7 +28,6 @@ export async function presignUpload(req: Request<unknown, unknown, PresignBody>,
       contentType: fileType,
       expiresIn: 60,
     });
-    console.log(uploadUrl);
     return res.json({ uploadUrl, fileUrl, key });
   } catch (err) {
     console.error(err);
@@ -46,5 +45,20 @@ export async function deleteObject(req: Request<unknown, unknown, DeleteBody>, r
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Failed to delete object" });
+  }
+}
+
+export async function signGetUrl(req: Request, res: Response) {
+  try {
+    const key = String(req.query.key || "");
+    if (!key) return res.status(400).json({ error: "key is required" });
+
+    // TODO (recommended): authorize ownership: ensure this key belongs to the requesting user
+
+    const { url } = await getPresignedGetUrl({ key, expiresIn: 300 });
+    return res.json({ url });
+  } catch (err: any) {
+    console.error(err);
+    return res.status(500).json({ error: err.message || "Failed to sign GET URL" });
   }
 }

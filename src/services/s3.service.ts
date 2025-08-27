@@ -1,4 +1,4 @@
-import { PutObjectCommand, DeleteObjectCommand, PutObjectCommandInput } from "@aws-sdk/client-s3";
+import { PutObjectCommand, DeleteObjectCommand, PutObjectCommandInput, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { s3 } from "../config/s3.client";
 
@@ -47,7 +47,28 @@ export async function getPresignedPutUrl(opts: {
   return { uploadUrl, fileUrl, requiresAclHeader: USE_OBJECT_ACL };
 }
 
-
 export async function deleteObjectByKey(key: string): Promise<void> {
   await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+}
+
+export async function getPresignedGetUrl(opts: {
+  key: string;
+  expiresIn?: number;         // seconds (default 300)
+  downloadName?: string;      // optional: force browser download with a filename
+}): Promise<{ url: string }> {
+  const { key, expiresIn = 300, downloadName } = opts;
+
+  // Optional: set ResponseContentDisposition to suggest a download filename
+  const ResponseContentDisposition = downloadName
+    ? `inline; filename="${downloadName.replace(/"/g, "")}"`
+    : undefined;
+
+  const cmd = new GetObjectCommand({
+    Bucket: BUCKET,
+    Key: key,
+    ...(ResponseContentDisposition ? { ResponseContentDisposition } : {}),
+  });
+
+  const url = await getSignedUrl(s3, cmd, { expiresIn });
+  return { url };
 }

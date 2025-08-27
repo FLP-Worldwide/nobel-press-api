@@ -21,7 +21,7 @@ app.use(express.json());
 app.use("/api/auth", authRoutes);
 app.use("/api/books", bookRoutes);
 app.use("/api/chapters", chapterRoutes);
-app.use("/s3", s3Routes);
+app.use("/api/s3", s3Routes);
 
 const PORT = 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

@@ -59,18 +59,27 @@ export const createBook = async (req: AuthRequest, res: Response) => {
 };
 
 // Get all books
-export const getAllBooks = async (_req: Request, res: Response) => {
+export const getUserBooks = async (req: AuthRequest, res: Response) => {
   try {
+    if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
+
     const books = await prisma.book.findMany({
-      include: { chapters: true, design: true, user: { select: { id: true, name: true } } },
+      where: { userId: req.userId }, // ✅ Only logged-in user's books
+      include: {
+        chapters: true,
+        design: true,
+        user: { select: { id: true, name: true } },
+      },
       orderBy: { createdAt: "desc" },
     });
+
     res.json(books);
   } catch (err) {
-    console.error("getAllBooks error:", err);
+    console.error("getUserBooks error:", err);
     res.status(500).json({ message: "Failed to fetch books" });
   }
 };
+
 
 // Get single book by ID
 export const getBookById = async (req: Request, res: Response) => {
@@ -89,6 +98,70 @@ export const getBookById = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to fetch book" });
   }
 };
+
+// Update book (partial) — author only
+export const updateBook = async (req: AuthRequest, res: Response) => {
+  const idNum = Number(req.params.id);
+  if (Number.isNaN(idNum)) return res.status(400).json({ message: "Invalid id" });
+  if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
+
+  try {
+    // Ensure the book exists and belongs to the caller
+    await assertBookOwnership(idNum, req.userId);
+
+    // Whitelist fields (ignore anything else)
+    const {
+      title,
+      subheading,
+      authorName,
+      coAuthor,
+      language,
+      genre,
+      status, // optional: if you use it on the Book model
+    } = req.body as Partial<{
+      title: string;
+      subheading: string | null;
+      authorName: string;
+      coAuthor: string | null;
+      language: string;
+      genre: string;
+      status: "DRAFT" | "IN_REVIEW" | "PUBLISHED" | "INACTIVE";
+    }>;
+
+    // Build payload only with defined keys so Prisma doesn't overwrite other fields
+    const data: Record<string, any> = {};
+    if (typeof title !== "undefined") data.title = title;
+    if (typeof subheading !== "undefined") data.subheading = subheading; // allow null
+    if (typeof authorName !== "undefined") data.authorName = authorName;
+    if (typeof coAuthor !== "undefined") data.coAuthor = coAuthor;       // allow null
+    if (typeof language !== "undefined") data.language = language;
+    if (typeof genre !== "undefined") data.genre = genre;
+    if (typeof status !== "undefined") data.status = status;
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ message: "No fields provided to update" });
+    }
+
+    const updated = await prisma.book.update({
+      where: { id: idNum },
+      data,
+      include: {
+        chapters: true,
+        design: true,
+        user: { select: { id: true, name: true } },
+      },
+    });
+
+    return res.json(updated);
+  } catch (err: any) {
+    if (err?.message === "NOT_FOUND") return res.status(404).json({ message: "Book not found" });
+    if (err?.message === "FORBIDDEN") return res.status(403).json({ message: "Forbidden" });
+    if (err?.code === "P2025") return res.status(404).json({ message: "Book not found" });
+    console.error("updateBook error:", err);
+    return res.status(500).json({ message: "Failed to update book" });
+  }
+};
+
 
 /* =========================
    Book Design (Create/Update/Get/Delete)
@@ -197,3 +270,66 @@ export const deleteBookDesign = async (req: AuthRequest, res: Response) => {
     return res.status(500).json({ message: "Failed to delete book design" });
   }
 };
+
+
+type UpdateCoversBody = {
+  frontCoverKey?: string | null;
+  backCoverKey?: string | null;
+  frontCoverUrl?: string | null;
+  backCoverUrl?: string | null;
+};
+
+function isValidUrl(v?: string | null) {
+  if (!v) return true;
+  try { new URL(v); return true; } catch { return false; }
+}
+
+export async function updateBookCovers(
+  req: AuthRequest & Request<{ id: string }, unknown, UpdateCoversBody>,
+  res: Response
+) {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ message: "Invalid book id" });
+
+    const { frontCoverKey, backCoverKey, frontCoverUrl, backCoverUrl } = req.body || {};
+
+    // Basic URL validation (optional fields)
+    if (!isValidUrl(frontCoverUrl) || !isValidUrl(backCoverUrl)) {
+      return res.status(400).json({ message: "Invalid URL format" });
+    }
+
+    const book = await prisma.book.findUnique({ where: { id } });
+    if (!book) return res.status(404).json({ message: "Book not found" });
+
+    // Build partial update only for provided fields
+    const data: Record<string, string | null> = {};
+    if (typeof frontCoverKey !== "undefined") data.frontCoverKey = frontCoverKey || null;
+    if (typeof backCoverKey !== "undefined") data.backCoverKey = backCoverKey || null;
+    if (typeof frontCoverUrl !== "undefined") data.frontCoverUrl = frontCoverUrl || null;
+    if (typeof backCoverUrl !== "undefined") data.backCoverUrl = backCoverUrl || null;
+
+    // Nothing to update?
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({ message: "No fields to update" });
+    }
+
+    const updated = await prisma.book.update({
+      where: { id },
+      data,
+      select: {
+        id: true,
+        frontCoverKey: true,
+        backCoverKey: true,
+        frontCoverUrl: true,
+        backCoverUrl: true,
+        updatedAt: true,
+      },
+    });
+
+    return res.json({ message: "Covers updated", book: updated });
+  } catch (err: any) {
+    console.error("updateBookCovers error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+}
