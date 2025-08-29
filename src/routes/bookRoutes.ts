@@ -8,6 +8,7 @@ import {
    getUserBooks,
    updateBook,
    updateBookCovers,
+   deleteBook
 } from "../controllers/bookController";
 import { authMiddleware, roleMiddleware } from "../middleware/authMiddleware";
 
@@ -21,6 +22,7 @@ router.get("/", authMiddleware, roleMiddleware("author"), getUserBooks);
 router.put("/:id", authMiddleware, updateBook); // only authors can update their own books
 router.get("/:id", authMiddleware, roleMiddleware("author"), getBookById); // everyone
 router.patch("/:id/covers", authMiddleware, updateBookCovers);
+router.delete("/:id", authMiddleware, roleMiddleware("author"), deleteBook); // only authors can delete their own books
 
 /* =========================
    BookDesign routes

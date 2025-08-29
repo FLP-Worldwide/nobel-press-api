@@ -64,7 +64,7 @@ export const getUserBooks = async (req: AuthRequest, res: Response) => {
     if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
 
     const books = await prisma.book.findMany({
-      where: { userId: req.userId }, // ✅ Only logged-in user's books
+      where: { userId: req.userId, deletedAt: null }, // ✅ Only logged-in user's books
       include: {
         chapters: true,
         design: true,
@@ -88,7 +88,7 @@ export const getBookById = async (req: Request, res: Response) => {
 
   try {
     const book = await prisma.book.findUnique({
-      where: { id: idNum },
+      where: { id: idNum , deletedAt: null},
       include: { chapters: true, design: true, user: { select: { id: true, name: true } } },
     });
     if (!book) return res.status(404).json({ message: "Book not found" });
@@ -333,3 +333,92 @@ export async function updateBookCovers(
     return res.status(500).json({ message: "Server error" });
   }
 }
+
+
+// Soft delete: sirf Book ko mark karo, children ko mat chuo
+export async function deleteBook(req: AuthRequest, res: Response) {
+  const bookId = Number(req.params.id);
+  if (Number.isNaN(bookId)) {
+    return res.status(400).json({ message: "Invalid book id" });
+  }
+
+  try {
+    // 1) Check ownership + current delete state
+    const book = await prisma.book.findUnique({
+      where: { id: bookId },
+      select: {
+        id: true,
+        userId: true,
+        deletedAt: true,
+      },
+    });
+
+    if (!book) return res.status(404).json({ message: "Book not found" });
+    if (book.userId !== req.userId) {
+      return res.status(403).json({ message: "Not allowed to delete this book" });
+    }
+    if (book.deletedAt) {
+      return res.status(409).json({ message: "Book already deleted" });
+    }
+
+    // 2) Soft delete (no child delete)
+    await prisma.book.update({
+      where: { id: bookId },
+      data: {
+        deletedAt: new Date(),
+        deletedBy: req.userId,
+      },
+    });
+
+    // 200 (json) > 204 (no body) for frontend clarity
+    return res.status(200).json({ ok: true, id: bookId, message: "Book soft-deleted" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Failed to soft delete book" });
+  }
+}
+
+
+export async function restoreBook(req: AuthRequest, res: Response) {
+  const bookId = Number(req.params.id);
+  if (Number.isNaN(bookId)) {
+    return res.status(400).json({ message: "Invalid book id" });
+  }
+
+  try {
+    // 1) Check ownership + current state
+    const book = await prisma.book.findUnique({
+      where: { id: bookId },
+      select: {
+        id: true,
+        userId: true,
+        deletedAt: true,
+      },
+    });
+
+    if (!book) return res.status(404).json({ message: "Book not found" });
+    if (book.userId !== req.userId) {
+      return res.status(403).json({ message: "Not allowed to restore this book" });
+    }
+    if (!book.deletedAt) {
+      return res.status(409).json({ message: "Book is not deleted" });
+    }
+
+    // 2) Restore
+    await prisma.book.update({
+      where: { id: bookId },
+      data: {
+        deletedAt: null,
+        deletedBy: null,
+      },
+    });
+
+    return res.json({ ok: true, id: bookId, message: "Book restored" });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Failed to restore book" });
+  }
+}
+
+
+
