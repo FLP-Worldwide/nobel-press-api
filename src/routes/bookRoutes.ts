@@ -8,7 +8,8 @@ import {
    getUserBooks,
    updateBook,
    updateBookCovers,
-   deleteBook
+   deleteBook,
+   getAllBooks
 } from "../controllers/bookController";
 import { authMiddleware, roleMiddleware } from "../middleware/authMiddleware";
 
@@ -17,6 +18,8 @@ const router = Router();
 /* =========================
    Book routes
    ========================= */
+
+router.get('/all',getAllBooks); // public route to get all books
 router.post("/", authMiddleware, roleMiddleware("author"), createBook); // only authors can create
 router.get("/", authMiddleware, roleMiddleware("author"), getUserBooks);
 router.put("/:id", authMiddleware, updateBook); // only authors can update their own books

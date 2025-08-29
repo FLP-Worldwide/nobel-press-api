@@ -31,6 +31,34 @@ async function assertBookOwnership(bookId: number, userId: number) {
    Books
    ========================= */
 
+//Get all books publicly (only non-deleted books)
+export const getAllBooks = async (req: Request, res: Response) => {
+  try {
+    const books = await prisma.book.findMany({
+      where: { deletedAt: null }, // filter out soft-deleted books
+      include: {
+        chapters: true, // include chapters
+        design: true,   // include design
+        user: {         // include limited user info
+          select: { id: true, name: true },
+        },
+      },
+      orderBy: { createdAt: "desc" }, // latest books first
+    });
+
+    if (!books || books.length === 0) {
+      return res.status(404).json({ message: "No books found" });
+    }
+
+    res.json(books);
+  } catch (err) {
+    console.error("getAllBooks error:", err);
+    res.status(500).json({ message: "Failed to fetch books" });
+  }
+};
+
+
+
 // Create a new book (only author)
 export const createBook = async (req: AuthRequest, res: Response) => {
   const { title, language, authorName, subheading, coAuthor, genre } = req.body;
@@ -81,6 +109,8 @@ export const getUserBooks = async (req: AuthRequest, res: Response) => {
 };
 
 
+
+
 // Get single book by ID
 export const getBookById = async (req: Request, res: Response) => {
   const idNum = Number(req.params.id);
@@ -88,7 +118,7 @@ export const getBookById = async (req: Request, res: Response) => {
 
   try {
     const book = await prisma.book.findUnique({
-      where: { id: idNum , deletedAt: null},
+      where: { id: idNum, deletedAt: null },
       include: { chapters: true, design: true, user: { select: { id: true, name: true } } },
     });
     if (!book) return res.status(404).json({ message: "Book not found" });

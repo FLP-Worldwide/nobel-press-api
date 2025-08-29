@@ -7,17 +7,9 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        Int      @id @default(autoincrement())
-  name      String
-  email     String   @unique
-  phone     String?
-  password  String
-  verified  Boolean  @default(false)
-  role      Role     @default(buyer)
-  books     Book[]
-  createdAt DateTime @default(now())
-}
+/* =========================
+   Enums (existing + new)
+   ========================= */
 
 enum Role {
   author
@@ -31,6 +23,61 @@ enum BookStatus {
   PUBLISHED
   INACTIVE
 }
+
+enum ChapterType {
+  chapter
+  intro
+  preface
+}
+
+/* --- New simple enums for orders & payments --- */
+enum OrderStatus {
+  PENDING
+  PAID
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  COD
+  CARD
+  UPI
+}
+
+enum ShippingMethod {
+  STANDARD
+  EXPRESS
+}
+
+/* =========================
+   Core Models (your existing, lightly updated with relations)
+   ========================= */
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  phone     String?
+  password  String
+  verified  Boolean  @default(false)
+  role      Role     @default(buyer)
+  books     Book[]
+  createdAt DateTime @default(now())
+
+  // New relations
+  cart     Cart?
+  orders   Order[]
+  payments Payment[]
+}
+
 model Book {
   id            Int       @id @default(autoincrement())
   userId        Int
@@ -43,8 +90,6 @@ model Book {
   status        BookStatus @default(DRAFT)
   chapters      BookChapter[]
   createdAt     DateTime   @default(now())
-
-  // ✅ add both @default(now()) and @updatedAt
   updatedAt     DateTime   @default(now()) @updatedAt
 
   // covers (optional)
@@ -56,31 +101,27 @@ model Book {
   deletedAt     DateTime?
   deletedBy     Int?
 
-  
   user          User       @relation(fields: [userId], references: [id])
+
+  // New relations
+  cartItems   CartItem[]
+  orderItems  OrderItem[]
   design        BookDesign?
 }
 
-
 model BookChapter {
-  id          Int       @id @default(autoincrement())
-  bookId      Int
-  title       String
-  type        ChapterType
-  content String @db.Text
-  createdAt   DateTime  @default(now())
+  id        Int      @id @default(autoincrement())
+  bookId    Int
+  title     String
+  type      ChapterType
+  content   String   @db.Text
+  createdAt DateTime @default(now())
 
-  book        Book      @relation(fields: [bookId], references: [id])
-}
-
-enum ChapterType {
-  chapter
-  intro
-  preface
+  book      Book     @relation(fields: [bookId], references: [id])
 }
 
 /* =========================
-   Book Design enums + model
+   Book Design (your existing)
    ========================= */
 
 enum BookSize {
@@ -115,21 +156,141 @@ enum CoverLamination {
 }
 
 model BookDesign {
-  id               Int            @id @default(autoincrement())
-  bookId           Int            @unique
-
-  size             BookSize
-  bindingType      BindingType
-  interior         BookInterior
-  paperType        PaperType
-  coverLamination  CoverLamination
+  id              Int       @id @default(autoincrement())
+  bookId          Int       @unique
+  size            BookSize
+  bindingType     BindingType
+  interior        BookInterior
+  paperType       PaperType
+  coverLamination CoverLamination
 
   // For CUSTOM size (inches)
-  customWidthIn    Decimal?       @db.Decimal(5,2)
-  customHeightIn   Decimal?       @db.Decimal(5,2)
+  customWidthIn   Decimal?  @db.Decimal(5, 2)
+  customHeightIn  Decimal?  @db.Decimal(5, 2)
 
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  book             Book           @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  book            Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+}
+
+/* =========================
+   Cart (simple)
+   ========================= */
+
+model Cart {
+  id         Int       @id @default(autoincrement())
+
+  // Either userId (for logged-in) OR sessionId (for guest)
+  userId     Int?      @unique
+  sessionId  String?   @unique
+
+  totalPrice Decimal   @db.Decimal(12, 2) @default(0)
+  totalQty   Int       @default(0)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  user       User?     @relation(fields: [userId], references: [id])
+  items      CartItem[]
+}
+
+
+model CartItem {
+  id        Int      @id @default(autoincrement())
+  cartId    Int
+  bookId    Int
+  price     Decimal  @db.Decimal(12, 2) // unit price at add time
+  qty       Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  book      Book     @relation(fields: [bookId], references: [id])
+
+  @@unique([cartId, bookId]) // one row per book per cart
+  @@index([bookId])
+}
+
+/* =========================
+   Order (simple)
+   ========================= */
+
+model Order {
+  id             Int            @id @default(autoincrement())
+  userId         Int
+  // monetary snapshot
+  subtotal       Decimal        @db.Decimal(12, 2)
+  tax            Decimal        @db.Decimal(12, 2) @default(0)
+  discount       Decimal        @db.Decimal(12, 2) @default(0)
+  shippingPrice  Decimal        @db.Decimal(12, 2) @default(0)
+  totalPrice     Decimal        @db.Decimal(12, 2)
+  totalQty       Int
+
+  status         OrderStatus    @default(PENDING)
+  paymentMethod  PaymentMethod
+  shippingMethod ShippingMethod
+
+  // Simple address snapshot
+  addressLine1   String
+  addressLine2   String?
+  city           String
+  state          String
+  postalCode     String
+  country        String
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  user           User           @relation(fields: [userId], references: [id])
+  items          OrderItem[]
+  payments       Payment[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id        Int      @id @default(autoincrement())
+  orderId   Int
+  bookId    Int
+  unitPrice Decimal  @db.Decimal(12, 2)
+  qty       Int
+  lineTotal Decimal  @db.Decimal(12, 2) // unitPrice * qty
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  book      Book     @relation(fields: [bookId], references: [id])
+
+  @@index([orderId])
+  @@index([bookId])
+}
+
+/* =========================
+   Payment (simple)
+   ========================= */
+
+model Payment {
+  id          Int           @id @default(autoincrement())
+  orderId     Int
+  userId      Int
+  amount      Decimal       @db.Decimal(12, 2)
+  method      PaymentMethod
+  status      PaymentStatus @default(PENDING)
+  // optional gateway refs (keep simple)
+  provider        String?
+  providerRef     String?   // transaction id
+  providerOrderId String?
+  errorMessage    String?
+  paidAt      DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  order       Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id])
+
+  @@index([orderId])
+  @@index([userId])
+  @@index([status])
 }
