@@ -8,11 +8,12 @@ import {
   updateItemQtyHandler,
 } from '../controllers/cartController';
 import { mergeGuestCartHandler } from '../controllers/cartMergeController';
+import { authMiddleware } from '../middleware/authMiddleware';
 
 const router = Router();
 
 router.get('/', getCartHandler);
-router.post('/items', addItemHandler);
+router.post('/items',authMiddleware, addItemHandler);
 router.patch('/items/:id', updateItemQtyHandler);
 router.delete('/items/:id', removeItemHandler);
 router.delete('/', clearCartHandler);

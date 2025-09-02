@@ -4,5 +4,5 @@ export type GuestPrincipal = { sessionId: string };
 export type Principal = UserPrincipal | GuestPrincipal;
 
 export function isUser(p: Principal): p is UserPrincipal {
-  return (p as any).userId !== undefined;
+  return (p as UserPrincipal).userId !== undefined;
 }
