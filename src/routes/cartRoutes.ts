@@ -12,7 +12,7 @@ import { authMiddleware } from '../middleware/authMiddleware';
 
 const router = Router();
 
-router.get('/', getCartHandler);
+router.get('/', authMiddleware,getCartHandler);
 router.post('/items',authMiddleware, addItemHandler);
 router.patch('/items/:id', updateItemQtyHandler);
 router.delete('/items/:id', removeItemHandler);

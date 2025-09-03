@@ -50,6 +50,7 @@ enum PaymentMethod {
   COD
   CARD
   UPI
+  PAYPAL
 }
 
 enum ShippingMethod {
@@ -58,7 +59,7 @@ enum ShippingMethod {
 }
 
 /* =========================
-   Core Models (your existing, lightly updated with relations)
+   Core Models
    ========================= */
 
 model User {
@@ -106,7 +107,7 @@ model Book {
   // New relations
   cartItems   CartItem[]
   orderItems  OrderItem[]
-  design        BookDesign?
+  design      BookDesign?
 }
 
 model BookChapter {
@@ -121,7 +122,7 @@ model BookChapter {
 }
 
 /* =========================
-   Book Design (your existing)
+   Book Design
    ========================= */
 
 enum BookSize {
@@ -194,7 +195,6 @@ model Cart {
   items      CartItem[]
 }
 
-
 model CartItem {
   id        Int      @id @default(autoincrement())
   cartId    Int
@@ -212,17 +212,18 @@ model CartItem {
 }
 
 /* =========================
-   Order (simple)
+   Order (UI aligned)
    ========================= */
 
 model Order {
   id             Int            @id @default(autoincrement())
   userId         Int
-  // monetary snapshot
+
+  // Order Summary snapshot
   subtotal       Decimal        @db.Decimal(12, 2)
+  savings        Decimal        @db.Decimal(12, 2) @default(0)     // UI: savings
+  storePickup    Decimal        @db.Decimal(12, 2) @default(0)     // UI: store pickup
   tax            Decimal        @db.Decimal(12, 2) @default(0)
-  discount       Decimal        @db.Decimal(12, 2) @default(0)
-  shippingPrice  Decimal        @db.Decimal(12, 2) @default(0)
   totalPrice     Decimal        @db.Decimal(12, 2)
   totalQty       Int
 
@@ -230,7 +231,10 @@ model Order {
   paymentMethod  PaymentMethod
   shippingMethod ShippingMethod
 
-  // Simple address snapshot
+  // Delivery snapshot (user may edit at checkout)
+  customerName   String
+  customerEmail  String
+  customerPhone  String
   addressLine1   String
   addressLine2   String?
   city           String
@@ -272,23 +276,23 @@ model OrderItem {
    ========================= */
 
 model Payment {
-  id          Int           @id @default(autoincrement())
-  orderId     Int
-  userId      Int
-  amount      Decimal       @db.Decimal(12, 2)
-  method      PaymentMethod
-  status      PaymentStatus @default(PENDING)
+  id              Int           @id @default(autoincrement())
+  orderId         Int
+  userId          Int
+  amount          Decimal       @db.Decimal(12, 2)
+  method          PaymentMethod
+  status          PaymentStatus @default(PENDING)
   // optional gateway refs (keep simple)
   provider        String?
   providerRef     String?   // transaction id
   providerOrderId String?
   errorMessage    String?
-  paidAt      DateTime?
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  paidAt          DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
-  order       Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  user        User          @relation(fields: [userId], references: [id])
+  order           Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user            User          @relation(fields: [userId], references: [id])
 
   @@index([orderId])
   @@index([userId])

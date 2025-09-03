@@ -5,6 +5,7 @@ import authRoutes from "./routes/authRoutes";
 import bookRoutes from "./routes/bookRoutes";
 import chapterRoutes from "./routes/chapterRoutes";
 import s3Routes from "./routes/s3.routes";
+import checkoutRoutes from "./routes/checkoutRoutes";
 
 import cartRoute from './routes/cartRoutes';
 import cookieParser from "cookie-parser";
@@ -28,6 +29,8 @@ app.use("/api/books", bookRoutes);
 app.use("/api/chapters", chapterRoutes);
 app.use("/api/s3", s3Routes);
 app.use('/api/cart', cartRoute);
+app.use("/api/checkout", checkoutRoutes);
+
 
 
 const PORT = 5000;
