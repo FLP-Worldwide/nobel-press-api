@@ -251,10 +251,15 @@ async function applyDecision(
     const review = await tx.bookReview.findUnique({ where: { id: reviewId } });
     if (!review) throw new Error("NOT_FOUND");
     if (review.status !== "SUBMITTED") throw new Error("ALREADY_REVIEWED");
+    const previousPayment = reviewStatus === "APPROVED" ? await tx.publishingPayment.findFirst({
+      where: { bookId: review.bookId, status: "PAID", amount: 199, currency: "INR" },
+    }) : null;
+    const nextStatus = previousPayment ? BookStatus.PUBLISHED : bookStatus;
     const transitioned = await tx.book.updateMany({
       where: { id: review.bookId, status: "IN_REVIEW" },
       data: {
-        status: bookStatus,
+        status: nextStatus,
+        ...(nextStatus === "PUBLISHED" ? { publishedAt: new Date() } : {}),
         approvedAt: bookStatus === "APPROVED" ? new Date() : null,
       },
     });
@@ -265,7 +270,7 @@ async function applyDecision(
       include: { revision: { select: { id: true, version: true, contentHash: true } } },
     });
     await tx.bookStatusEvent.create({
-      data: { bookId: review.bookId, actorId, previousStatus: "IN_REVIEW", newStatus: bookStatus, notes },
+      data: { bookId: review.bookId, actorId, previousStatus: "IN_REVIEW", newStatus: nextStatus, notes },
     });
     const book = await tx.book.findUnique({ where: { id: review.bookId } });
     return { review: updatedReview, book };
@@ -295,3 +300,25 @@ function decisionHandler(reviewStatus: BookReviewStatus, bookStatus: BookStatus,
 export const approveReview = decisionHandler("APPROVED", "APPROVED", false);
 export const requestReviewChanges = decisionHandler("CHANGES_REQUESTED", "CHANGES_REQUESTED", true);
 export const rejectReview = decisionHandler("REJECTED", "REJECTED", true);
+
+// Opening a revision removes the mutable edition from the public catalogue.
+// Existing immutable review snapshots and the original paid fee are retained.
+export const startBookRevision = async (req: AuthRequest, res: Response) => {
+  const id = parseId(req.params.id);
+  if (!id || !req.userId) return res.status(400).json({ message: "Invalid request" });
+  try {
+    const book = await requireOwnedBook(id, req.userId);
+    if (!["PUBLISHED", "APPROVED", "REJECTED"].includes(book.status)) {
+      return res.status(409).json({ message: "Wait for the review or payment decision before starting changes" });
+    }
+    const result = await prisma.$transaction(async tx => {
+      const changed = await tx.book.updateMany({ where: { id, userId: req.userId!, status: book.status }, data: { status: "CHANGES_REQUESTED", approvedAt: null } });
+      if (changed.count !== 1) throw new Error("STATE_CHANGED");
+      await tx.bookStatusEvent.create({ data: { bookId: id, actorId: req.userId!, previousStatus: book.status, newStatus: "CHANGES_REQUESTED", notes: "Author opened a new revision; review required before publication" } });
+      return tx.book.findUnique({ where: { id } });
+    });
+    return res.json({ book: result });
+  } catch (error: any) {
+    return res.status(error.message === "FORBIDDEN" ? 403 : error.message === "NOT_FOUND" ? 404 : 409).json({ message: "Cannot start this revision. Refresh and try again." });
+  }
+};

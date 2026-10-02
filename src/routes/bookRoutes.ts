@@ -14,7 +14,7 @@ import {
    ,restoreBook
 } from "../controllers/bookController";
 import { authMiddleware, roleMiddleware } from "../middleware/authMiddleware";
-import { getBookReviewStatus, submitBookForReview } from "../controllers/reviewController";
+import { getBookReviewStatus, submitBookForReview, startBookRevision } from "../controllers/reviewController";
 import {
   getPublishingPaymentStatus,
   initiatePublishingPayment,
@@ -29,6 +29,7 @@ const router = Router();
 
 router.get('/all',getAllBooks); // public route to get all books
 router.get('/public/:id', getPublicBookById);
+router.post("/:id/revise", authMiddleware, roleMiddleware("author"), startBookRevision);
 router.post("/", authMiddleware, roleMiddleware("author"), createBook); // only authors can create
 router.get("/", authMiddleware, roleMiddleware("author", "admin"), getUserBooks);
 router.put("/:id", authMiddleware, roleMiddleware("author"), updateBook);

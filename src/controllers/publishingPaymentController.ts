@@ -52,6 +52,8 @@ export const initiatePublishingPayment = async (req: AuthRequest, res: Response)
     if (!["APPROVED", "PAYMENT_PENDING"].includes(book.status)) {
       return res.status(409).json({ message: "The publishing fee is available only after approval" });
     }
+    const paidFee = await prisma.publishingPayment.findFirst({ where: { bookId, status: "PAID", amount: 199, currency: "INR" } });
+    if (paidFee) return res.status(409).json({ message: "The one-time publishing fee is already paid. This revision needs review only." });
     const approvedReview = await prisma.bookReview.findFirst({
       where: { bookId, status: "APPROVED" },
       orderBy: { reviewedAt: "desc" },

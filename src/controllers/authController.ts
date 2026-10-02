@@ -23,10 +23,10 @@ export const signup = async (req: Request, res: Response) => {
   const email = cleanString(req.body?.email).toLowerCase();
   const password = typeof req.body?.password === "string" ? req.body.password : "";
   const phone = cleanString(req.body?.phone) || null;
-  // This is the public self-publishing registration route, so every new
-  // account receives author access. Roles are never accepted from the request;
+  // Public registration supports author and reader accounts only.
+  // Arbitrary roles are never accepted from the request;
   // admins are provisioned only through a trusted operational process.
-  const role = "author" as const;
+  const role = req.body?.accountType === "buyer" ? "buyer" : "author";
 
   if (!name || !email || !/^\S+@\S+\.\S+$/.test(email)) {
     return res.status(400).json({ message: "A valid name and email are required" });
