@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import prisma from "../utils/prisma";
 import { verifyToken } from "../utils/auth";
 
 export interface AuthRequest extends Request {
@@ -6,40 +7,38 @@ export interface AuthRequest extends Request {
   role?: string;
 }
 
-export const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
+export const authMiddleware = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ message: "Unauthorized" });
   }
 
-  const token = authHeader.split(" ")[1];
+  const token = authHeader.slice("Bearer ".length).trim();
+  if (!token) return res.status(401).json({ message: "Unauthorized" });
 
   try {
     const payload = verifyToken(token);
-    req.userId = payload.userId;
-    // Optional: get role from database
-    // We’ll fetch role in controller when needed
-    next();
-  } catch (err) {
+    const user = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { id: true, role: true },
+    });
+    if (!user) return res.status(401).json({ message: "Invalid token" });
+
+    req.userId = user.id;
+    req.role = user.role;
+    req.user = user;
+    return next();
+  } catch {
     return res.status(401).json({ message: "Invalid token" });
   }
 };
 
-// Middleware to check for specific role(s)
 export const roleMiddleware = (...allowedRoles: string[]) => {
-  return async (req: AuthRequest, res: Response, next: NextFunction) => {
-    const userId = req.userId;
-    if (!userId) return res.status(401).json({ message: "Unauthorized" });
-
-    const prisma = (await import("../utils/prisma")).default;
-    const user = await prisma.user.findUnique({ where: { id: userId } });
-    if (!user) return res.status(401).json({ message: "Unauthorized" });
-
-    if (!allowedRoles.includes(user.role)) {
+  return (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.userId || !req.role) return res.status(401).json({ message: "Unauthorized" });
+    if (!allowedRoles.includes(req.role)) {
       return res.status(403).json({ message: "Forbidden: Access denied" });
     }
-
-    req.role = user.role;
-    next();
+    return next();
   };
 };

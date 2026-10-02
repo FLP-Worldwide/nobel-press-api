@@ -7,9 +7,11 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-/* =========================
-   Enums (existing + new)
-   ========================= */
+/**
+ * =========================
+ * Enums (existing + new)
+ * =========================
+ */
 
 enum Role {
   author
@@ -20,8 +22,26 @@ enum Role {
 enum BookStatus {
   DRAFT
   IN_REVIEW
+  CHANGES_REQUESTED
+  APPROVED
+  PAYMENT_PENDING
   PUBLISHED
+  REJECTED
   INACTIVE
+}
+
+enum BookReviewStatus {
+  SUBMITTED
+  APPROVED
+  CHANGES_REQUESTED
+  REJECTED
+}
+
+enum PublishingFeeStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
 }
 
 enum ChapterType {
@@ -30,13 +50,20 @@ enum ChapterType {
   preface
 }
 
-/* --- New simple enums for orders & payments --- */
+/**
+ * --- New simple enums for orders & payments ---
+ */
 enum OrderStatus {
   PENDING
   PAID
   SHIPPED
   DELIVERED
   CANCELLED
+}
+
+enum OrderKind {
+  RETAIL
+  AUTHOR_COPY
 }
 
 enum PaymentStatus {
@@ -58,9 +85,11 @@ enum ShippingMethod {
   EXPRESS
 }
 
-/* =========================
-   Core Models
-   ========================= */
+/**
+ * =========================
+ * Core Models
+ * =========================
+ */
 
 model User {
   id        Int      @id @default(autoincrement())
@@ -69,29 +98,43 @@ model User {
   phone     String?
   password  String
   verified  Boolean  @default(false)
-  role      Role     @default(buyer)
+  role      Role     @default(author)
   books     Book[]
   createdAt DateTime @default(now())
 
   // New relations
-  cart     Cart?
-  orders   Order[]
-  payments Payment[]
+  cart             Cart?
+  orders           Order[]
+  payments         Payment[]
+  submittedReviews BookReview[]        @relation("ReviewSubmitter")
+  reviewedReviews  BookReview[]        @relation("ReviewReviewer")
+  publishingFees   PublishingPayment[]
+  statusEvents     BookStatusEvent[]   @relation("BookStatusActor")
 }
 
 model Book {
-  id            Int       @id @default(autoincrement())
-  userId        Int
-  title         String
-  language      String
-  authorName    String
-  subheading    String?
-  coAuthor      String?
-  genre         String?
-  status        BookStatus @default(DRAFT)
-  chapters      BookChapter[]
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @default(now()) @updatedAt
+  id              Int           @id @default(autoincrement())
+  userId          Int
+  title           String
+  language        String
+  authorName      String
+  subheading      String?
+  coAuthor        String?
+  genre           String?
+  description     String?       @db.Text
+  authorBiography String?       @db.Text
+  categories      Json?
+  keywords        Json?
+  termsAcceptedAt DateTime?
+  retailPrice     Decimal?      @db.Decimal(12, 2)
+  currency        String        @default("INR")
+  status          BookStatus    @default(DRAFT)
+  chapters        BookChapter[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @default(now()) @updatedAt
+  submittedAt     DateTime?
+  approvedAt      DateTime?
+  publishedAt     DateTime?
 
   // covers (optional)
   frontCoverKey String?
@@ -99,31 +142,118 @@ model Book {
   frontCoverUrl String?
   backCoverUrl  String?
 
-  deletedAt     DateTime?
-  deletedBy     Int?
+  deletedAt DateTime?
+  deletedBy Int?
 
-  user          User       @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id])
 
   // New relations
-  cartItems   CartItem[]
-  orderItems  OrderItem[]
-  design      BookDesign?
+  cartItems      CartItem[]
+  orderItems     OrderItem[]
+  design         BookDesign?
+  revisions      BookRevision[]
+  reviews        BookReview[]
+  publishingFees PublishingPayment[]
+  statusEvents   BookStatusEvent[]
 }
 
 model BookChapter {
-  id        Int      @id @default(autoincrement())
+  id        Int         @id @default(autoincrement())
   bookId    Int
   title     String
   type      ChapterType
-  content   String   @db.Text
-  createdAt DateTime @default(now())
+  content   String      @db.LongText
+  position  Int         @default(0)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @default(now()) @updatedAt
 
-  book      Book     @relation(fields: [bookId], references: [id])
+  book Book @relation(fields: [bookId], references: [id])
 }
 
-/* =========================
-   Book Design
-   ========================= */
+/**
+ * Immutable snapshots used by reviewers and by the eventual print pipeline.
+ */
+model BookRevision {
+  id          Int      @id @default(autoincrement())
+  bookId      Int
+  version     Int
+  snapshot    Json
+  contentHash String   @db.VarChar(64)
+  createdAt   DateTime @default(now())
+
+  book           Book                @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  review         BookReview?
+  publishingFees PublishingPayment[]
+
+  @@unique([bookId, version])
+  @@index([bookId])
+}
+
+model BookReview {
+  id            Int              @id @default(autoincrement())
+  bookId        Int
+  revisionId    Int              @unique
+  status        BookReviewStatus @default(SUBMITTED)
+  authorMessage String?          @db.Text
+  reviewerNotes String?          @db.Text
+  submittedById Int
+  reviewedById  Int?
+  submittedAt   DateTime         @default(now())
+  reviewedAt    DateTime?
+
+  book        Book         @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  revision    BookRevision @relation(fields: [revisionId], references: [id], onDelete: Cascade)
+  submittedBy User         @relation("ReviewSubmitter", fields: [submittedById], references: [id])
+  reviewedBy  User?        @relation("ReviewReviewer", fields: [reviewedById], references: [id])
+
+  @@index([bookId, submittedAt])
+  @@index([status, submittedAt])
+}
+
+model PublishingPayment {
+  id              Int                 @id @default(autoincrement())
+  bookId          Int
+  revisionId      Int
+  userId          Int
+  amount          Decimal             @db.Decimal(12, 2)
+  currency        String              @default("INR")
+  status          PublishingFeeStatus @default(PENDING)
+  provider        String?
+  providerOrderId String?             @unique
+  providerRef     String?             @unique
+  errorMessage    String?             @db.Text
+  paidAt          DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  book     Book         @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  revision BookRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  user     User         @relation(fields: [userId], references: [id])
+
+  @@index([bookId, status])
+  @@index([userId])
+}
+
+model BookStatusEvent {
+  id             Int        @id @default(autoincrement())
+  bookId         Int
+  actorId        Int
+  previousStatus BookStatus
+  newStatus      BookStatus
+  notes          String?    @db.Text
+  createdAt      DateTime   @default(now())
+
+  book  Book @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  actor User @relation("BookStatusActor", fields: [actorId], references: [id])
+
+  @@index([bookId, createdAt])
+}
+
+/**
+ * =========================
+ * Book Design
+ * =========================
+ */
 
 enum BookSize {
   FIVE_X_EIGHT
@@ -157,8 +287,8 @@ enum CoverLamination {
 }
 
 model BookDesign {
-  id              Int       @id @default(autoincrement())
-  bookId          Int       @unique
+  id              Int             @id @default(autoincrement())
+  bookId          Int             @unique
   size            BookSize
   bindingType     BindingType
   interior        BookInterior
@@ -166,33 +296,35 @@ model BookDesign {
   coverLamination CoverLamination
 
   // For CUSTOM size (inches)
-  customWidthIn   Decimal?  @db.Decimal(5, 2)
-  customHeightIn  Decimal?  @db.Decimal(5, 2)
+  customWidthIn  Decimal? @db.Decimal(5, 2)
+  customHeightIn Decimal? @db.Decimal(5, 2)
 
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  book            Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  book Book @relation(fields: [bookId], references: [id], onDelete: Cascade)
 }
 
-/* =========================
-   Cart (simple)
-   ========================= */
+/**
+ * =========================
+ * Cart (simple)
+ * =========================
+ */
 
 model Cart {
-  id         Int       @id @default(autoincrement())
+  id Int @id @default(autoincrement())
 
   // Either userId (for logged-in) OR sessionId (for guest)
-  userId     Int?      @unique
-  sessionId  String?   @unique
+  userId    Int?    @unique
+  sessionId String? @unique
 
-  totalPrice Decimal   @db.Decimal(12, 2) @default(0)
-  totalQty   Int       @default(0)
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  totalPrice Decimal  @default(0) @db.Decimal(12, 2)
+  totalQty   Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
-  user       User?     @relation(fields: [userId], references: [id])
-  items      CartItem[]
+  user  User?      @relation(fields: [userId], references: [id])
+  items CartItem[]
 }
 
 model CartItem {
@@ -204,27 +336,31 @@ model CartItem {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
-  book      Book     @relation(fields: [bookId], references: [id])
+  cart Cart @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  book Book @relation(fields: [bookId], references: [id])
 
   @@unique([cartId, bookId]) // one row per book per cart
   @@index([bookId])
 }
 
-/* =========================
-   Order (UI aligned)
-   ========================= */
+/**
+ * =========================
+ * Order (UI aligned)
+ * =========================
+ */
 
 model Order {
-  id             Int            @id @default(autoincrement())
-  userId         Int
+  id     Int       @id @default(autoincrement())
+  userId Int
+  kind   OrderKind @default(RETAIL)
 
   // Order Summary snapshot
-  subtotal       Decimal        @db.Decimal(12, 2)
-  savings        Decimal        @db.Decimal(12, 2) @default(0)     // UI: savings
-  storePickup    Decimal        @db.Decimal(12, 2) @default(0)     // UI: store pickup
-  tax            Decimal        @db.Decimal(12, 2) @default(0)
-  totalPrice     Decimal        @db.Decimal(12, 2)
+  subtotal       Decimal @db.Decimal(12, 2)
+  savings        Decimal @default(0) @db.Decimal(12, 2) // UI: savings
+  storePickup    Decimal @default(0) @db.Decimal(12, 2) // UI: store pickup
+  shippingCharge Decimal @default(0) @db.Decimal(12, 2)
+  tax            Decimal @default(0) @db.Decimal(12, 2)
+  totalPrice     Decimal @db.Decimal(12, 2)
   totalQty       Int
 
   status         OrderStatus    @default(PENDING)
@@ -232,22 +368,22 @@ model Order {
   shippingMethod ShippingMethod
 
   // Delivery snapshot (user may edit at checkout)
-  customerName   String
-  customerEmail  String
-  customerPhone  String
-  addressLine1   String
-  addressLine2   String?
-  city           String
-  state          String
-  postalCode     String
-  country        String
+  customerName  String
+  customerEmail String
+  customerPhone String
+  addressLine1  String
+  addressLine2  String?
+  city          String
+  state         String
+  postalCode    String
+  country       String
 
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  user           User           @relation(fields: [userId], references: [id])
-  items          OrderItem[]
-  payments       Payment[]
+  user     User        @relation(fields: [userId], references: [id])
+  items    OrderItem[]
+  payments Payment[]
 
   @@index([userId])
   @@index([status])
@@ -264,16 +400,18 @@ model OrderItem {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  book      Book     @relation(fields: [bookId], references: [id])
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  book  Book  @relation(fields: [bookId], references: [id])
 
   @@index([orderId])
   @@index([bookId])
 }
 
-/* =========================
-   Payment (simple)
-   ========================= */
+/**
+ * =========================
+ * Payment (simple)
+ * =========================
+ */
 
 model Payment {
   id              Int           @id @default(autoincrement())
@@ -284,15 +422,15 @@ model Payment {
   status          PaymentStatus @default(PENDING)
   // optional gateway refs (keep simple)
   provider        String?
-  providerRef     String?   // transaction id
+  providerRef     String? // transaction id
   providerOrderId String?
   errorMessage    String?
   paidAt          DateTime?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  order           Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  user            User          @relation(fields: [userId], references: [id])
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id])
 
   @@index([orderId])
   @@index([userId])

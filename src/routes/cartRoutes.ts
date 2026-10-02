@@ -14,9 +14,9 @@ const router = Router();
 
 router.get('/', authMiddleware,getCartHandler);
 router.post('/items',authMiddleware, addItemHandler);
-router.patch('/items/:id', updateItemQtyHandler);
-router.delete('/items/:id', removeItemHandler);
-router.delete('/', clearCartHandler);
-router.post('/merge-guest', mergeGuestCartHandler);
+router.patch('/items/:id', authMiddleware, updateItemQtyHandler);
+router.delete('/items/:id', authMiddleware, removeItemHandler);
+router.delete('/', authMiddleware, clearCartHandler);
+router.post('/merge-guest', authMiddleware, mergeGuestCartHandler);
 
 export default router;

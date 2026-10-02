@@ -10,6 +10,17 @@ export const checkoutController = {
 
       const { delivery, paymentMethod, shippingMethod } = req.body;
 
+      const requiredDelivery = ["name", "email", "phone", "addressLine1", "city", "state", "postalCode", "country"];
+      if (!delivery || requiredDelivery.some((field) => typeof delivery[field] !== "string" || !delivery[field].trim())) {
+        return res.status(400).json({ success: false, message: "Complete delivery details are required" });
+      }
+      if (!["CARD", "UPI"].includes(paymentMethod)) {
+        return res.status(400).json({ success: false, message: "A supported online payment method is required" });
+      }
+      if (!["STANDARD", "EXPRESS"].includes(shippingMethod)) {
+        return res.status(400).json({ success: false, message: "Invalid shipping method" });
+      }
+
       const order = await checkoutService.createOrder({
         userId: req.userId,   // ✅ अब userId पास होगा
         delivery,
@@ -24,7 +35,7 @@ export const checkoutController = {
       });
     } catch (error: any) {
       console.error("Checkout error:", error);
-      res.status(500).json({
+      res.status(400).json({
         success: false,
         message: "Checkout failed",
         error: error.message,

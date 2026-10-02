@@ -25,9 +25,9 @@ export async function addItemHandler(req: Request, res: Response) {
   try {
     const p = principalFromReq(req);
 
-    const { bookId, qty = 1, price } = req.body;
-    if (!bookId || price == null) return res.status(400).json({ message: 'bookId and price are required' });
-    res.status(201).json(await addItem(p, Number(bookId), Number(qty), price));
+    const { bookId, qty = 1 } = req.body;
+    if (!bookId) return res.status(400).json({ message: 'bookId is required' });
+    res.status(201).json(await addItem(p, Number(bookId), Number(qty)));
   } catch (e: any) { res.status(400).json({ message: e.message ?? 'Bad request' }); }
 }
 

@@ -4,10 +4,6 @@ import { Principal, isUser } from '../types/principal';
 
 const U = Prisma.validator<Prisma.CartUncheckedCreateInput>;
 
-function D(v: string | number | Prisma.Decimal): Prisma.Decimal {
-  return v instanceof Prisma.Decimal ? v : new Prisma.Decimal(v);
-}
-
 function whereByPrincipal(p: Principal) {
   return isUser(p) ? { userId: p.userId } : { sessionId: p.sessionId! };
 }
@@ -63,12 +59,16 @@ export async function addItem(
   p: Principal,
   bookId: number,
   qty = 1,
-  price: string | number | Prisma.Decimal
 ) {
-  if (qty <= 0) throw new Error('Quantity must be >= 1');
-  const unit = D(price);
+  if (!Number.isInteger(qty) || qty <= 0 || qty > 100) throw new Error('Quantity must be between 1 and 100');
 
   return prisma.$transaction(async (tx) => {
+    const book = await tx.book.findFirst({
+      where: { id: bookId, status: 'PUBLISHED', deletedAt: null, retailPrice: { gt: 0 } },
+      select: { retailPrice: true },
+    });
+    if (!book?.retailPrice) throw new Error('Book is unavailable for purchase');
+    const unit = book.retailPrice;
     let cart = await tx.cart.findFirst({ where: whereByPrincipal(p) });
     if (!cart) cart = await createCartForPrincipalTx(tx, p); // ✅ OK
 
@@ -77,9 +77,10 @@ export async function addItem(
     });
 
     if (existing) {
+      if (existing.qty + qty > 100) throw new Error('Quantity must be between 1 and 100');
       await tx.cartItem.update({
         where: { cartId_bookId: { cartId: cart.id, bookId } },
-        data: { qty: existing.qty + qty },
+        data: { qty: existing.qty + qty, price: unit },
       });
     } else {
       await tx.cartItem.create({ data: { cartId: cart.id, bookId, qty, price: unit } });
@@ -156,17 +157,22 @@ export async function mergeGuestCartToUser(sessionId: string, userId: number) {
 
     const gItems = await tx.cartItem.findMany({ where: { cartId: guest.id } });
     for (const gi of gItems) {
+      const book = await tx.book.findFirst({
+        where: { id: gi.bookId, status: 'PUBLISHED', deletedAt: null, retailPrice: { gt: 0 } },
+        select: { retailPrice: true },
+      });
+      if (!book?.retailPrice) continue;
       const existing = await tx.cartItem.findUnique({
         where: { cartId_bookId: { cartId: userCart.id, bookId: gi.bookId } },
       });
       if (existing) {
         await tx.cartItem.update({
           where: { cartId_bookId: { cartId: userCart.id, bookId: gi.bookId } },
-          data: { qty: existing.qty + gi.qty },
+          data: { qty: existing.qty + gi.qty, price: book.retailPrice },
         });
       } else {
         await tx.cartItem.create({
-          data: { cartId: userCart.id, bookId: gi.bookId, qty: gi.qty, price: gi.price },
+          data: { cartId: userCart.id, bookId: gi.bookId, qty: gi.qty, price: book.retailPrice },
         });
       }
     }

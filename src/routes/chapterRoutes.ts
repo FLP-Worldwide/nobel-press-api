@@ -5,7 +5,7 @@ import { authMiddleware, roleMiddleware } from "../middleware/authMiddleware";
 const router = Router({ mergeParams: true });
 
 router.post("/:bookId", authMiddleware, roleMiddleware("author"), addChapter); // only authors
-router.get("/:bookId", getChaptersByBook);                                     // everyone
+router.get("/:bookId", authMiddleware, roleMiddleware("author", "admin"), getChaptersByBook);
 router.put("/:id", authMiddleware, roleMiddleware("author"), updateChapter)
 router.delete("/:id", authMiddleware, roleMiddleware("author"), deleteChapter)
 
