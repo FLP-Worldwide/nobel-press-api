@@ -4,7 +4,7 @@ import prisma from "../utils/prisma";
 import { accessErrorResponse, requireOwnedEditableBook } from "../utils/bookAccess";
 
 const MAX_CHAPTER_BYTES = 5 * 1024 * 1024;
-const CHAPTER_TYPES = new Set(["chapter", "intro", "preface"]);
+const CHAPTER_TYPES = new Set(["chapter", "intro", "preface", "section"]);
 
 function parseId(value: string): number | null {
   const id = Number(value);
@@ -30,14 +30,30 @@ export const addChapter = async (req: AuthRequest, res: Response) => {
   const title = typeof req.body?.title === "string" ? req.body.title.trim().slice(0, 200) : "";
   const content = validateContent(req.body?.content ?? "");
   const type = req.body?.type;
-  const position = Number.isInteger(req.body?.position) && req.body.position >= 0 ? req.body.position : 0;
+  const afterChapterId = req.body?.afterChapterId;
+  if (afterChapterId !== undefined && (!Number.isInteger(afterChapterId) || afterChapterId < 1)) {
+    return res.status(400).json({ message: "Invalid section to insert after" });
+  }
   if (!title || content === null || !CHAPTER_TYPES.has(type)) {
     return res.status(400).json({ message: "Valid title, type, and content (maximum 5 MB) are required" });
   }
 
   try {
     await requireOwnedEditableBook(bookId, req.userId);
-    const chapter = await prisma.bookChapter.create({ data: { bookId, title, type, content, position } });
+    if (afterChapterId !== undefined && !await prisma.bookChapter.findFirst({ where: { id: afterChapterId, bookId } })) {
+      return res.status(400).json({ message: "The preceding section must belong to this book." });
+    }
+    const chapter = await prisma.$transaction(async (tx) => {
+      // Serialize insertions for one book so concurrent tabs cannot overwrite order.
+      await tx.book.update({ where: { id: bookId }, data: { updatedAt: new Date() } });
+      const existing = await tx.bookChapter.findMany({ where: { bookId }, orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }] });
+      const insertion = afterChapterId === undefined ? existing.length : existing.findIndex(item => item.id === afterChapterId) + 1;
+      if (afterChapterId !== undefined && insertion === 0) throw new Error("The preceding section was removed.");
+      for (let index = 0; index < existing.length; index++) {
+        await tx.bookChapter.update({ where: { id: existing[index].id }, data: { position: index >= insertion ? index + 1 : index } });
+      }
+      return tx.bookChapter.create({ data: { bookId, title, type, content, position: insertion } });
+    });
     return res.status(201).json(chapter);
   } catch (error) {
     if (sendAccessError(error, res)) return;
@@ -74,7 +90,7 @@ export const updateChapter = async (req: AuthRequest, res: Response) => {
     if (!existing) return res.status(404).json({ message: "Chapter not found" });
     await requireOwnedEditableBook(existing.bookId, req.userId);
 
-    const data: { title?: string; content?: string; type?: "chapter" | "intro" | "preface"; position?: number } = {};
+    const data: { title?: string; content?: string; type?: "chapter" | "intro" | "preface" | "section"; position?: number } = {};
     if (req.body?.title !== undefined) {
       const title = typeof req.body.title === "string" ? req.body.title.trim().slice(0, 200) : "";
       if (!title) return res.status(400).json({ message: "Chapter title cannot be empty" });

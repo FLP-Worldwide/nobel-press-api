@@ -45,6 +45,7 @@ enum PublishingFeeStatus {
 }
 
 enum ChapterType {
+  section
   chapter
   intro
   preface
@@ -294,6 +295,8 @@ model BookDesign {
   interior        BookInterior
   paperType       PaperType
   coverLamination CoverLamination
+
+  layoutStyle     String?         @db.VarChar(40)
 
   // For CUSTOM size (inches)
   customWidthIn  Decimal? @db.Decimal(5, 2)

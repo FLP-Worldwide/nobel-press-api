@@ -270,30 +270,38 @@ export const upsertBookDesign = async (req: AuthRequest, res: Response) => {
   const bookId = idParam(req.params.bookId);
   if (!bookId) return res.status(400).json({ message: "Invalid bookId" });
   if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
-  const { size, bindingType, interior, paperType, coverLamination, customWidthIn, customHeightIn } = req.body as {
+  const { size, bindingType, interior, paperType, coverLamination, customWidthIn, customHeightIn, layoutStyle } = req.body as {
     size: BookSize;
     bindingType: BindingType;
     interior: BookInterior;
     paperType: PaperType;
     coverLamination: CoverLamination;
+    layoutStyle?: string;
     customWidthIn?: string | number | null;
     customHeightIn?: string | number | null;
   };
 
   try {
     await requireOwnedEditableBook(bookId, req.userId);
+    if (layoutStyle !== undefined) {
+      const book = await prisma.book.findUnique({ where: { id: bookId }, select: { language: true } });
+      const styles = /hindi|हिंदी|हिन्दी/i.test(book?.language || "")
+        ? ["hindi-sahitya", "hindi-saral"]
+        : ["english-classic", "english-modern", "english-literary"];
+      if (!styles.includes(layoutStyle)) return res.status(400).json({ message: "Choose a supported layout for this book's language." });
+    }
     if (size === "CUSTOM" && (!customWidthIn || !customHeightIn)) {
       return res.status(400).json({ message: "Custom width and height are required" });
     }
     const design = await prisma.bookDesign.upsert({
       where: { bookId },
       create: {
-        bookId, size, bindingType, interior, paperType, coverLamination,
+        bookId, size, bindingType, interior, paperType, coverLamination, layoutStyle,
         customWidthIn: customWidthIn ? new Prisma.Decimal(customWidthIn) : null,
         customHeightIn: customHeightIn ? new Prisma.Decimal(customHeightIn) : null,
       },
       update: {
-        size, bindingType, interior, paperType, coverLamination,
+        size, bindingType, interior, paperType, coverLamination, layoutStyle,
         customWidthIn: customWidthIn ? new Prisma.Decimal(customWidthIn) : null,
         customHeightIn: customHeightIn ? new Prisma.Decimal(customHeightIn) : null,
       },

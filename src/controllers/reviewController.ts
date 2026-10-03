@@ -64,6 +64,7 @@ function buildSnapshot(book: any): Prisma.InputJsonObject {
     design: book.design
       ? {
           size: book.design.size,
+          layoutStyle: book.design.layoutStyle ?? null,
           bindingType: book.design.bindingType,
           interior: book.design.interior,
           paperType: book.design.paperType,
