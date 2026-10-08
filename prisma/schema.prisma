@@ -142,6 +142,7 @@ model Book {
   backCoverKey  String?
   frontCoverUrl String?
   backCoverUrl  String?
+  coverDesign   Json?
 
   deletedAt DateTime?
   deletedBy Int?

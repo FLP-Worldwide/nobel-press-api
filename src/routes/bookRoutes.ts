@@ -21,6 +21,8 @@ import {
 } from "../controllers/publishingPaymentController";
 import { createAuthorCopyOrder, quoteAuthorCopies } from "../controllers/authorCopyController";
 
+import { saveCoverDesign } from "../controllers/coverDesignController";
+
 const router = Router();
 
 /* =========================
@@ -34,6 +36,7 @@ router.post("/", authMiddleware, roleMiddleware("author"), createBook); // only 
 router.get("/", authMiddleware, roleMiddleware("author", "admin"), getUserBooks);
 router.put("/:id", authMiddleware, roleMiddleware("author"), updateBook);
 router.get("/:id", authMiddleware, roleMiddleware("author", "admin"), getBookById);
+router.put("/:id/cover-design", authMiddleware, roleMiddleware("author"), saveCoverDesign);
 router.patch("/:id/covers", authMiddleware, roleMiddleware("author"), updateBookCovers);
 router.post("/:id/submit-review", authMiddleware, roleMiddleware("author"), submitBookForReview);
 router.get("/:id/review-status", authMiddleware, roleMiddleware("author", "admin"), getBookReviewStatus);

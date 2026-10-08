@@ -37,7 +37,7 @@ app.use("/api/orders", orderRoutes);
 
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err?.type === "entity.too.large") {
-        return res.status(413).json({ message: "Request is too large. A chapter may be at most 5 MB." });
+        return res.status(413).json({ message: "Request is too large. Use smaller images or reduce the content size." });
     }
     return next(err);
 });

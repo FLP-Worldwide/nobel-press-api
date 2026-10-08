@@ -1,3 +1,4 @@
+import { coverMatchesTrim } from "../utils/coverDesign";
 import { createHash } from "crypto";
 import { BookReviewStatus, BookStatus, Prisma } from "@prisma/client";
 import { Response } from "express";
@@ -31,7 +32,8 @@ function buildSubmissionIssues(book: any): string[] {
   if (!jsonArrayHasValue(book.keywords)) issues.push("Add at least one keyword");
   if (!book.termsAcceptedAt) issues.push("Accept the publishing terms");
   if (!book.design) issues.push("Choose the book design and print specifications");
-  if (!book.frontCoverKey && !book.frontCoverUrl) issues.push("Upload a front cover");
+  if (!book.frontCoverKey && !book.frontCoverUrl && !book.coverDesign?.front) issues.push("Design or upload a front cover");
+  if (book.coverDesign && !coverMatchesTrim(book.coverDesign,book.design)) issues.push("Open the cover designer and save your cover to match the current page size");
   if (!book.chapters.some((chapter: any) => hasText(chapter.content))) {
     issues.push("Add manuscript content to at least one chapter");
   }
@@ -56,6 +58,7 @@ function buildSnapshot(book: any): Prisma.InputJsonObject {
       retailPrice: book.retailPrice?.toString() ?? null,
       currency: book.currency,
       termsAcceptedAt: book.termsAcceptedAt?.toISOString() ?? null,
+      coverDesign: book.coverDesign ?? null,
       frontCoverKey: book.frontCoverKey,
       backCoverKey: book.backCoverKey,
       frontCoverUrl: book.frontCoverUrl,
@@ -122,7 +125,7 @@ export const submitBookForReview = async (req: AuthRequest, res: Response) => {
 
     const result = await prisma.$transaction(async (tx) => {
       const transitioned = await tx.book.updateMany({
-        where: { id: bookId, userId: req.userId!, status: { in: ["DRAFT", "CHANGES_REQUESTED"] } },
+        where: { id: bookId, userId: req.userId!, updatedAt: book.updatedAt, status: { in: ["DRAFT", "CHANGES_REQUESTED"] } },
         data: { status: "IN_REVIEW", submittedAt: now, approvedAt: null },
       });
       if (transitioned.count !== 1) throw new Error("STATE_CHANGED");
