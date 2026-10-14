@@ -2,10 +2,14 @@
   "name": "nobel-express-api",
   "version": "1.0.0",
   "description": "",
-  "main": "app.js",
+  "main": "dist/app.js",
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
-    "build": "tsc",
+    "build": "prisma generate && tsc && node scripts/check-runtime.cjs",
+    "test:deployment": "npm run build && node --test tests/deployment.test.cjs",
     "start": "node dist/app.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
@@ -19,6 +23,12 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "allowScripts": {
+    "@prisma/client@6.14.0": true,
+    "@prisma/engines@6.14.0": true,
+    "prisma@6.14.0": true,
+    "bcrypt@6.0.0": true
+  },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
     "@types/cookie-parser": "^1.4.9",

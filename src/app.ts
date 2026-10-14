@@ -13,14 +13,30 @@ import orderRoutes from "./routes/orderRoutes";
 import cartRoute from './routes/cartRoutes';
 import cookieParser from "cookie-parser";
 import { guestSession } from "./middleware/guestSession";
+import { corsOptions } from "./config/cors";
+import prisma from "./utils/prisma";
 
 const app = express();
-app.use(
-    cors({
-        origin: (process.env.ALLOWED_ORIGIN?.split(",") || ["*"]),
-        credentials: true,
-    })
-);
+app.use(cors(corsOptions()));
+// Liveness works without a database connection and never sets a guest cookie.
+app.get(["/", "/api", "/api/health"], (_req, res) => {
+    res.set("Cache-Control", "no-store").json({ status: "ok", service: "nobel-press-api" });
+});
+app.get("/api/health/ready", async (_req, res) => {
+    res.set("Cache-Control", "no-store");
+    const missing = ["DATABASE_URL", "JWT_SECRET"].filter(key => !process.env[key]?.trim());
+    if (missing.length) {
+        console.error(`API configuration missing: ${missing.join(", ")}`);
+        return res.status(503).json({ status: "unavailable", message: "API configuration is incomplete" });
+    }
+    try {
+        await prisma.$queryRaw`SELECT 1`;
+        return res.json({ status: "ok", database: "connected" });
+    } catch (error: any) {
+        console.error("API database readiness failed", error?.code || error?.name || "DatabaseError");
+        return res.status(503).json({ status: "unavailable", message: "Database connection failed" });
+    }
+});
 app.use(express.json({ limit: "6mb" }));
 app.use(cookieParser());
 app.use(guestSession());
@@ -39,9 +55,19 @@ app.use((err: any, _req: express.Request, res: express.Response, next: express.N
     if (err?.type === "entity.too.large") {
         return res.status(413).json({ message: "Request is too large. Use smaller images or reduce the content size." });
     }
-    return next(err);
+    if (err?.type === "entity.parse.failed") {
+        return res.status(400).json({ message: "Request body must contain valid JSON" });
+    }
+    if (res.headersSent) return next(err);
+    console.error("Unhandled API error", err?.code || err?.name || "Error");
+    return res.status(500).json({ message: "An unexpected server error occurred" });
 });
 
 
-const PORT = Number(process.env.PORT || 5000);
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+export default app;
+
+// Vercel imports the app; only the local/server command opens a port.
+if (require.main === module && !process.env.VERCEL) {
+    const PORT = Number(process.env.PORT || 5000);
+    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
