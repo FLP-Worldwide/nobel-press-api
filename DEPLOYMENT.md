@@ -9,12 +9,14 @@ The API and website are separate Vercel projects. Deploy this repository to
 - Framework preset: Express.
 - Node.js: 24.x, pinned in `package.json`.
 - Install command: `npm ci --include=dev`.
-- Build command: `npm run build`.
+- Build command: `npm run vercel-build`.
 - Output directory: leave the override disabled. Express is a function, not a static `dist` site.
 
 `vercel.json` supplies the framework and commands. The build explicitly runs
 `prisma generate`, compiles TypeScript, and checks that the complete application,
-Prisma Client and bcrypt can load. It does not connect to or migrate a database.
+Prisma Client and bcrypt can load. `npm run build` does not connect to or migrate
+a database. `npm run vercel-build` also applies checked-in PostgreSQL migrations
+when `VERCEL_ENV=production`; preview builds skip migrations.
 The four dependency install scripts are approved by exact installed version in
 `package.json`; update those approvals when upgrading those dependencies.
 
@@ -25,7 +27,9 @@ Preview if you use it):
 
 | Name | Value |
 | --- | --- |
-| `DATABASE_URL` | Your hosted MySQL connection string, with URL-encoded credentials. A localhost database cannot be reached by Vercel. |
+| `nobel_book_api_DATABASE_URL` | Supplied by the existing Prisma Postgres integration. The API and release script prefer this managed PostgreSQL TCP connection over the old `DATABASE_URL`. Keep the integration value private. |
+| `DATABASE_URL` | PostgreSQL TCP connection for environments without that integration. The old MySQL/localhost value is obsolete. |
+| `DIRECT_URL` | Optional direct PostgreSQL connection for migrations when a separate pooler requires it. Must point to the same database as the application's connection. |
 | `JWT_SECRET` | Your existing production signing secret. Keep it private and stable across deployments. |
 | `ALLOWED_ORIGIN` | `https://nobelbooks.vercel.app` |
 | `AWS_REGION`, `S3_BUCKET` | Your existing storage configuration, with appropriate AWS credentials/role for uploads. |
@@ -50,18 +54,36 @@ configure the existing PhonePe variables before accepting payments.
 
 ## Database schema
 
-Against the intended hosted database, run `npm run prisma:migrate:deploy` from
-your release environment. The database needs every checked-in migration,
-including `20261008063000_cover_canvas`. Do not run development resets or
-`prisma db push` against production. Preview deployments should use a separate
-database; migrations intentionally do not run automatically on every Vercel build.
+The active schema uses PostgreSQL. `20261015090000_postgres_baseline` creates all
+tables, constraints, review/payment models and cover artwork fields in an empty
+PostgreSQL database. Production Vercel builds apply it with `prisma migrate deploy`;
+subsequent builds apply only pending migrations. A migration failure stops the
+deployment. The script rejects MySQL URLs and loopback addresses on Vercel, and
+uses the same managed connection as the API unless `DIRECT_URL` is explicitly set.
+
+The previous MySQL schema and migration history are preserved in
+`prisma/legacy/mysql`. No MySQL database is modified or copied by this release.
+Existing local users and books remain in MySQL; importing them is a separate data
+migration. Do not reset an existing database, use `db push` against production,
+or mark the new baseline as applied to bypass a nonempty-database error.
+
+For a manual release, run `npm run prisma:migrate:deploy` with the intended
+PostgreSQL connection in the environment. Local `.env` values only fill missing
+environment variables. Local development now needs a PostgreSQL database; use
+the updated `.env.example` instead of the previous local MySQL connection.
+
+Use a separate database for preview deployments. The existing integration was
+attached to both Production and Preview during diagnosis; skipping preview
+migrations alone does not isolate preview application traffic.
 
 ## Release and verify
 
 1. Push these changes to the repository connected to the API project and deploy
    that revision. Redeploying an older revision does not include this fix.
 2. For the first redeploy, turn off **Use existing Build Cache**. Check the build
-   log for `Generated Prisma Client` and `Runtime check passed`.
+   log for `Generated Prisma Client`, `Runtime check passed`, and successful
+   PostgreSQL migrations. A project-level build-command override must also use
+   `npm run vercel-build`.
 3. Open `/api` or `/api/health`: expect HTTP 200 and `status: ok`. This checks
    startup only.
 4. Open `/api/health/ready`: expect HTTP 200 and `database: connected`. A 503
@@ -84,8 +106,15 @@ response. Its missing CORS header can cause the browser to show a second CORS
 error. The previous `tsc`-only build did not explicitly generate Prisma Client;
 a clean install with scripts disabled reproduced a missing `.prisma/client/default`
 module. The revised build fixes that reproducible startup failure and also fixes
-the independent wildcard-array CORS fallback. Production runtime logs are still
-needed to confirm whether this was the exact exception in the failed deployment.
+the independent wildcard-array CORS fallback. The original exception was not
+available in runtime logs at that point.
+
+On October 15 the API's liveness route returned 200, but readiness returned 503
+and the catalogue returned 500. Vercel's runtime log confirmed that
+`prisma.book.findMany()` was attempting to connect to `127.0.0.1:3307`. The project
+already had a Prisma Postgres integration, but the code still used MySQL and the
+stale local `DATABASE_URL`. The PostgreSQL schema, managed-connection selection,
+quoted cover-save locking query and production migration step address that mismatch.
 
 References: [Vercel Express support](https://vercel.com/docs/frameworks/backend/express),
 [Prisma 6 deployment guidance](https://docs.prisma.io/docs/orm/v6/prisma-client/deployment/serverless/deploy-to-vercel),

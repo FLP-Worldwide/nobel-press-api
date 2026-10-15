@@ -15,6 +15,7 @@ import cookieParser from "cookie-parser";
 import { guestSession } from "./middleware/guestSession";
 import { corsOptions } from "./config/cors";
 import prisma from "./utils/prisma";
+import { assertDatabaseUrl, getDatabaseUrl } from "./config/database";
 
 const app = express();
 app.use(cors(corsOptions()));
@@ -24,12 +25,13 @@ app.get(["/", "/api", "/api/health"], (_req, res) => {
 });
 app.get("/api/health/ready", async (_req, res) => {
     res.set("Cache-Control", "no-store");
-    const missing = ["DATABASE_URL", "JWT_SECRET"].filter(key => !process.env[key]?.trim());
+    const missing = [!getDatabaseUrl() && "DATABASE_URL", !process.env.JWT_SECRET?.trim() && "JWT_SECRET"].filter(Boolean);
     if (missing.length) {
         console.error(`API configuration missing: ${missing.join(", ")}`);
         return res.status(503).json({ status: "unavailable", message: "API configuration is incomplete" });
     }
     try {
+        assertDatabaseUrl(getDatabaseUrl(), Boolean(process.env.VERCEL));
         await prisma.$queryRaw`SELECT 1`;
         return res.json({ status: "ok", database: "connected" });
     } catch (error: any) {

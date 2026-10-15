@@ -1,4 +1,6 @@
 import { PrismaClient } from "@prisma/client";
+import { getDatabaseUrl } from "../config/database";
 
-const prisma = new PrismaClient();
+const databaseUrl = getDatabaseUrl();
+const prisma = new PrismaClient(databaseUrl ? { datasourceUrl: databaseUrl } : undefined);
 export default prisma;

@@ -11,7 +11,7 @@ export async function saveCoverDesign(req:AuthRequest,res:Response){
   if(typeof req.body.expectedUpdatedAt!=='string'||!Number.isFinite(Date.parse(req.body.expectedUpdatedAt)))return res.status(400).json({message:'Reload the book before saving the cover.'});
   try{
     const book=await prisma.$transaction(async tx=>{
-      await tx.$queryRaw`SELECT id FROM Book WHERE id = ${id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM "Book" WHERE id = ${id} FOR UPDATE`;
       const current=await tx.book.findFirst({where:{id,deletedAt:null},include:{design:true}});
       if(!current)throw Error('NOT_FOUND');if(current.userId!==req.userId)throw Error('FORBIDDEN');if(!isEditableBookStatus(current.status))throw Error('BOOK_LOCKED');
       if(!coverMatchesTrim(design,current.design))throw Error('COVER_SIZE');

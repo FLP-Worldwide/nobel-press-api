@@ -7,7 +7,8 @@ const cors = require('cors');
 // Never use a developer or production database in deployment smoke tests.
 process.env.NODE_ENV = 'production';
 process.env.VERCEL = '1';
-process.env.DATABASE_URL = 'mysql://test:test@127.0.0.1:1/deployment_test';
+process.env.DATABASE_URL = 'postgresql://test:test@database.invalid:5432/deployment_test';
+process.env.nobel_book_api_DATABASE_URL = '';
 process.env.JWT_SECRET = 'deployment-test-only';
 // An explicit blank prevents Prisma's local .env loader from injecting localhost.
 process.env.ALLOWED_ORIGIN = '';
