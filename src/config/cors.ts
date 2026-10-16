@@ -23,7 +23,7 @@ export function corsOptions(env: NodeJS.ProcessEnv = process.env): CorsOptions {
     origin: [...origins],
     credentials: true,
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type"],
+    allowedHeaders: ["Authorization", "Content-Type", "Idempotency-Key"],
     maxAge: 600,
   };
 }

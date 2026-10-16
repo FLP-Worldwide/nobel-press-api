@@ -1,7 +1,7 @@
 import { Response } from "express";
 import { AuthRequest } from "../middleware/authMiddleware";
 import prisma from "../utils/prisma";
-import { accessErrorResponse, requireOwnedEditableBook } from "../utils/bookAccess";
+import { accessErrorResponse, requireOwnedEditableBook, withEditableBook } from "../utils/bookAccess";
 
 const MAX_CHAPTER_BYTES = 5 * 1024 * 1024;
 const CHAPTER_TYPES = new Set(["chapter", "intro", "preface", "section"]);
@@ -43,7 +43,7 @@ export const addChapter = async (req: AuthRequest, res: Response) => {
     if (afterChapterId !== undefined && !await prisma.bookChapter.findFirst({ where: { id: afterChapterId, bookId } })) {
       return res.status(400).json({ message: "The preceding section must belong to this book." });
     }
-    const chapter = await prisma.$transaction(async (tx) => {
+    const chapter = await withEditableBook(bookId, req.userId, async (tx) => {
       // Serialize insertions for one book so concurrent tabs cannot overwrite order.
       await tx.book.update({ where: { id: bookId }, data: { updatedAt: new Date() } });
       const existing = await tx.bookChapter.findMany({ where: { bookId }, orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }] });
@@ -112,7 +112,7 @@ export const updateChapter = async (req: AuthRequest, res: Response) => {
       data.position = req.body.position;
     }
     if (!Object.keys(data).length) return res.status(400).json({ message: "No fields to update" });
-    return res.json(await prisma.bookChapter.update({ where: { id }, data }));
+    return res.json(await withEditableBook(existing.bookId, req.userId, tx => tx.bookChapter.update({ where: { id }, data })));
   } catch (error) {
     if (sendAccessError(error, res)) return;
     console.error("updateChapter error:", error);
@@ -128,7 +128,7 @@ export const deleteChapter = async (req: AuthRequest, res: Response) => {
     const existing = await prisma.bookChapter.findUnique({ where: { id }, select: { bookId: true } });
     if (!existing) return res.status(404).json({ message: "Chapter not found" });
     await requireOwnedEditableBook(existing.bookId, req.userId);
-    await prisma.bookChapter.delete({ where: { id } });
+    await withEditableBook(existing.bookId, req.userId, tx => tx.bookChapter.delete({ where: { id } }));
     return res.json({ message: "Chapter deleted" });
   } catch (error) {
     if (sendAccessError(error, res)) return;

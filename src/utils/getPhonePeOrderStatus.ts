@@ -27,6 +27,7 @@ export async function getPhonePeOrderStatus(merchantOrderId: string): Promise<Ph
 
   const response = await fetch(endpoint, {
     method: "GET",
+    signal: AbortSignal.timeout(15000),
     headers: {
       "Content-Type": "application/json",
       Authorization: `O-Bearer ${accessToken}`,

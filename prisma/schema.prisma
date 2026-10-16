@@ -31,6 +31,7 @@ enum BookStatus {
 }
 
 enum BookReviewStatus {
+  PAYMENT_PENDING
   SUBMITTED
   APPROVED
   CHANGES_REQUESTED
@@ -57,6 +58,7 @@ enum ChapterType {
 enum OrderStatus {
   PENDING
   PAID
+  PRINTING
   SHIPPED
   DELIVERED
   CANCELLED
@@ -127,6 +129,8 @@ model Book {
   categories      Json?
   keywords        Json?
   termsAcceptedAt DateTime?
+  pageCount       Int?
+  printCost       Decimal?      @db.Decimal(12, 2)
   retailPrice     Decimal?      @db.Decimal(12, 2)
   currency        String        @default("INR")
   status          BookStatus    @default(DRAFT)
@@ -181,6 +185,7 @@ model BookRevision {
   version     Int
   snapshot    Json
   contentHash String   @db.VarChar(64)
+  orderItems  OrderItem[]
   createdAt   DateTime @default(now())
 
   book           Book                @relation(fields: [bookId], references: [id], onDelete: Cascade)
@@ -221,6 +226,8 @@ model PublishingPayment {
   currency        String              @default("INR")
   status          PublishingFeeStatus @default(PENDING)
   provider        String?
+  redirectUrl     String?
+  initiationStartedAt DateTime?
   providerOrderId String?             @unique
   providerRef     String?             @unique
   errorMessage    String?             @db.Text
@@ -357,6 +364,11 @@ model Order {
   id     Int       @id @default(autoincrement())
   userId Int
   kind   OrderKind @default(RETAIL)
+  checkoutKey String? @unique
+  currency String @default("INR")
+  trackingNumber String?
+  trackingUrl String?
+  carrier String?
 
   // Order Summary snapshot
   subtotal       Decimal @db.Decimal(12, 2)
@@ -398,6 +410,14 @@ model OrderItem {
   id        Int      @id @default(autoincrement())
   orderId   Int
   bookId    Int
+  revisionId Int?
+  revision BookRevision? @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  title String?
+  printCost Decimal? @db.Decimal(12, 2)
+  platformCommission Decimal? @db.Decimal(12, 2)
+  authorEarnings Decimal? @db.Decimal(12, 2)
+  cartItemId Int?
+  cartItemUpdatedAt DateTime?
   unitPrice Decimal  @db.Decimal(12, 2)
   qty       Int
   lineTotal Decimal  @db.Decimal(12, 2) // unitPrice * qty
@@ -426,8 +446,11 @@ model Payment {
   status          PaymentStatus @default(PENDING)
   // optional gateway refs (keep simple)
   provider        String?
-  providerRef     String? // transaction id
-  providerOrderId String?
+  currency        String @default("INR")
+  redirectUrl     String?
+  initiationStartedAt DateTime?
+  providerRef     String? @unique // transaction id
+  providerOrderId String? @unique
   errorMessage    String?
   paidAt          DateTime?
   createdAt       DateTime      @default(now())

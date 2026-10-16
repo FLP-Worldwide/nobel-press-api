@@ -23,6 +23,7 @@ export const initiatePhonePePayment = async (
 
     const response = await fetch(`${process.env.PHONEPE_BASE_URL}/checkout/v2/pay`, {
       method: "POST",
+      signal: AbortSignal.timeout(15000),
       headers: {
         "Content-Type": "application/json",
         "Authorization": `O-Bearer ${accessToken}`, // PhonePe requires this format
@@ -40,7 +41,7 @@ export const initiatePhonePePayment = async (
       }),
     });
 
-    console.log("📥 PhonePe API Response Status:", response.status);
+
 
     // Parse JSON safely
     const data = await response.json().catch(() => null);
@@ -73,7 +74,7 @@ export const initiatePhonePePayment = async (
     };
 
   } catch (err: any) {
-    console.error("❌ Exception during PhonePe API call:", err);
+
 
     return {
       success: false,

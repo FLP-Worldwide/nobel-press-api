@@ -1,0 +1,262 @@
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { EventEmitter } = require('node:events');
+const mocks = require('node-mocks-http');
+const { PrismaPGlite } = require('pglite-prisma-adapter');
+const { PGlite } = require('@electric-sql/pglite');
+
+
+let db, app, prisma, author, buyer, admin, outsider, bookId, reviewId;
+const attempts = new Map();
+let charges = 0, failInitiation = false;
+const tokens = {};
+const realFetch = global.fetch;
+const delivery = { name: 'Test Reader', email: 'reader@example.test', phone: '9000000001', addressLine1: 'Test street', city: 'Jaipur', state: 'Rajasthan', postalCode: '302001', country: 'India' };
+async function call(route, role = 'author', method = 'GET', body, expected = 200, headers = {}) {
+  const { req, res } = mocks.createMocks({ method, url: '/api' + route, headers: { authorization: `Bearer ${tokens[role]}`, 'content-type': 'application/json', ...headers }, body: body || {} }, { eventEmitter: EventEmitter });
+  const ended = new Promise((resolve, reject) => { res.on('end', resolve); res.on('error', reject); });
+  app.handle(req, res);
+  await ended;
+  const data = res._getJSONData();
+  assert.equal(res.statusCode, expected, `${method} ${route}: ${JSON.stringify(data)}`);
+  return data;
+}
+before(async () => {
+  db = await PGlite.create();
+  for (const dir of fs.readdirSync(path.join(__dirname, '../prisma/migrations')).filter(name => /^\d/.test(name)).sort()) {
+    await db.exec(fs.readFileSync(path.join(__dirname, '../prisma/migrations', dir, 'migration.sql'), 'utf8'));
+  }
+  process.env.DATABASE_URL = 'postgresql://test:test@database.invalid:5432/isolated_test';
+  process.env.nobel_book_api_DATABASE_URL = '';
+  process.env.JWT_SECRET = 'isolated-commerce-test-only';
+  process.env.NODE_ENV = 'test';
+  process.env.VERCEL = '';
+  process.env.PHONEPE_BASE_URL = 'https://mock-phonepe.invalid';
+  process.env.PHONEPE_TOKEN_URL = `${process.env.PHONEPE_BASE_URL}/v1/oauth/token`;
+  global.fetch = async (input, options = {}) => {
+    const url = new URL(String(input));
+    assert.equal(url.origin, process.env.PHONEPE_BASE_URL, 'Tests must never call a real gateway');
+    if (url.pathname === '/v1/oauth/token') return Response.json({ access_token: 'test-token' });
+    if (url.pathname === '/checkout/v2/pay') {
+      charges++;
+      const body = JSON.parse(options.body);
+      if (!attempts.has(body.merchantOrderId)) attempts.set(body.merchantOrderId, { state: 'PENDING', amount: body.amount, orderId: `provider-${charges}` });
+      if (failInitiation) return Response.json({ message: 'Ambiguous provider failure' }, { status: 500 });
+      return Response.json({ redirectUrl: `https://pay.example.test/${body.merchantOrderId}` });
+    }
+    const id = url.pathname.split('/')[4];
+    return Response.json(attempts.get(id) || { state: 'PENDING', amount: 0 });
+  };
+  process.env.PHONEPE_CLIENT_ID = 'test'; process.env.PHONEPE_CLIENT_SECRET = 'test';
+  process.env.PAYMENT_REDIRECT_URL = 'http://localhost:3000/payment/callback';
+  const { PrismaClient } = require('../node_modules/.commerce-test-client');
+  prisma = new PrismaClient({ adapter: new PrismaPGlite(db) });
+  const prismaModule = require.resolve('../dist/utils/prisma');
+  require.cache[prismaModule] = { id: prismaModule, filename: prismaModule, loaded: true, exports: { __esModule: true, default: prisma } };
+  const { generateToken } = require('../dist/utils/auth');
+  for (const role of ['author', 'buyer', 'admin', 'outsider']) {
+    const user = await prisma.user.create({ data: { name: role, email: `${role}@example.test`, password: 'not-a-real-login', role: role === 'outsider' ? 'author' : role } });
+    tokens[role] = generateToken(user.id);
+    if (role === 'author') author = user;
+    if (role === 'buyer') buyer = user;
+    if (role === 'admin') admin = user;
+    if (role === 'outsider') outsider = user;
+  }
+  app = require('../dist/app').default;
+});
+after(async () => {
+  global.fetch = realFetch;
+  if (prisma) await prisma.$disconnect();
+  if (db) await db.close();
+});
+
+test('money calculations deduct print cost before commission, round in paise and exclude author-copy royalties', () => {
+  const { getBookPricing, calculateOrderLine, money } = require('../dist/utils/commerce');
+  const book = { title: 'Test', retailPrice: '249', printCost: '90', pageCount: 150 };
+  const pricing = getBookPricing(book);
+  assert.equal(pricing.platformCommission, 39.75); assert.equal(pricing.authorEarnings, 119.25);
+  assert.equal(pricing.authorCopyPrice, 174.3); assert.equal(pricing.minimumSellingPrice, 128.58);
+  const copies = calculateOrderLine(book, 5, 'AUTHOR_COPY');
+  assert.equal(String(copies.lineTotal), '871.5'); assert.equal(String(copies.authorEarnings), '0');
+  assert.throws(() => calculateOrderLine(book, 4, 'AUTHOR_COPY'));
+  assert.throws(() => calculateOrderLine({ ...book, retailPrice: '100' }, 1, 'RETAIL'));
+  for (const value of [true, null, '', -1, '1.001', 'NaN']) assert.throws(() => money(value));
+  const pennies = getBookPricing({ ...book, retailPrice: '249.01' });
+  assert.equal(pennies.authorEarnings, 119.26);
+});
+
+test('submitted revision locks before payment, stays out of queue, and verifies into review only once', async () => {
+  const book = await prisma.book.create({ data: { userId: author.id, title: 'Immutable book', language: 'English', authorName: 'Test Author', description: 'Test description', authorBiography: 'Test biography', genre: 'Fiction', keywords: ['test'], termsAcceptedAt: new Date(), frontCoverUrl: 'https://example.test/cover.png',
+    design: { create: { size: 'FIVE_X_EIGHT', bindingType: 'PAPERBACK', interior: 'BLACK_WHITE', paperType: 'CREAM', coverLamination: 'MATTE' } },
+    chapters: { create: { title: 'First chapter', type: 'chapter', content: '<p>The exact submitted text.</p>' } } } });
+  bookId = book.id;
+  const submission = await call(`/books/${bookId}/submit-review`, 'author', 'POST', {}, 201);
+  reviewId = submission.review.id;
+  assert.equal(submission.book.status, 'PAYMENT_PENDING'); assert.equal(submission.review.status, 'PAYMENT_PENDING');
+  assert.equal((await call('/reviews', 'admin')).reviews.length, 0);
+  await call(`/books/${bookId}`, 'author', 'PUT', { title: 'Unsafe edit' }, 409);
+  await call(`/reviews/${reviewId}/approve`, 'admin', 'POST', { pageCount: 150, printCost: 90 }, 409);
+  await call(`/books/${bookId}/publishing-payment/initiate`, 'outsider', 'POST', {}, 409);
+  const results = await Promise.all([call(`/books/${bookId}/publishing-payment/initiate`, 'author', 'POST', {}), call(`/books/${bookId}/publishing-payment/initiate`, 'author', 'POST', {})]);
+  assert.equal(results[0].payment.id, results[1].payment.id); assert.equal(charges, 1);
+  const payment = results[0].payment;
+  const provider = attempts.get(payment.providerOrderId);
+  provider.state = 'COMPLETED'; provider.amount = 1;
+  await call(`/books/${bookId}/publishing-payment/status`, 'author', 'GET', undefined, 502);
+  assert.equal((await prisma.book.findUnique({ where: { id: bookId } })).status, 'PAYMENT_PENDING');
+  provider.amount = 19900;
+  await Promise.all([call(`/books/${bookId}/publishing-payment/status`), call(`/books/${bookId}/publishing-payment/status`)]);
+  assert.equal((await prisma.book.findUnique({ where: { id: bookId } })).status, 'IN_REVIEW');
+  assert.equal((await call('/reviews', 'admin')).reviews.length, 1);
+  assert.equal(await prisma.bookStatusEvent.count({ where: { bookId, newStatus: 'IN_REVIEW' } }), 1);
+  await call(`/books/${bookId}/publish`, 'author', 'POST', { retailPrice: 249 }, 409);
+});
+
+test('approval requires print cost, author publishes with a safe price and exact approved revision', async () => {
+  await call(`/reviews/${reviewId}/approve`, 'buyer', 'POST', { pageCount: 150, printCost: 90 }, 403);
+  await call(`/reviews/${reviewId}/approve`, 'admin', 'POST', {}, 400);
+  const approved = await call(`/reviews/${reviewId}/approve`, 'admin', 'POST', { pageCount: 150, printCost: '90.00', notes: 'Ready for readers' });
+  assert.equal(approved.book.status, 'APPROVED');
+  assert.equal((await call(`/books/${bookId}/pricing`)).pricing.authorCopyMinQty, 5);
+  await call(`/books/${bookId}/publish`, 'author', 'POST', { retailPrice: 100 }, 409);
+  const published = await call(`/books/${bookId}/publish`, 'author', 'POST', { retailPrice: 249 });
+  assert.equal(published.book.status, 'PUBLISHED');
+  await call(`/books/${bookId}/publish`, 'author', 'POST', { retailPrice: 249 });
+  const proof = await call(`/reviews/${reviewId}`, 'admin');
+  assert.match(proof.revision.snapshot.chapters[0].content, /exact submitted/);
+});
+
+let retailOrder, copyOrder;
+test('retail checkout ignores caller prices, preserves cart until paid and reuses concurrent retries', async () => {
+  const cart = await prisma.cart.create({ data: { userId: buyer.id, totalQty: 2, totalPrice: 2, items: { create: { bookId, qty: 2, price: 1 } } } });
+  const body = { delivery, paymentMethod: 'UPI', shippingMethod: 'STANDARD', checkoutKey: 'checkout-test-retail', totalPrice: 1, userId: outsider.id };
+  const results = await Promise.all([call('/checkout', 'buyer', 'POST', body, 201), call('/checkout', 'buyer', 'POST', body, 201)]);
+  retailOrder = results[0].order;
+  assert.equal(retailOrder.id, results[1].order.id); assert.equal(Number(retailOrder.totalPrice), 577);
+  assert.equal(retailOrder.userId, buyer.id); assert.equal(Number(retailOrder.items[0].authorEarnings), 119.25);
+  assert.ok(retailOrder.items[0].revisionId); assert.equal(await prisma.cartItem.count({ where: { cartId: cart.id } }), 1);
+  await call('/checkout', 'buyer', 'POST', { ...body, delivery: { ...delivery, city: 'Delhi' } }, 400);
+  await call(`/orders/${retailOrder.id}/payment/status`, 'outsider', 'GET', undefined, 404);
+  await call(`/orders/${retailOrder.id}/fulfilment`, 'admin', 'PATCH', { status: 'PRINTING' }, 409);
+  const started = await call(`/orders/${retailOrder.id}/payment/initiate`, 'buyer', 'POST', {});
+  const retry = await call(`/orders/${retailOrder.id}/payment/initiate`, 'buyer', 'POST', {});
+  assert.equal(started.payment.id, retry.payment.id); assert.equal(charges, 2);
+  attempts.get(started.payment.providerOrderId).state = 'COMPLETED';
+  await Promise.all([call(`/orders/${retailOrder.id}/payment/status`, 'buyer'), call(`/orders/${retailOrder.id}/payment/status`, 'buyer')]);
+  assert.equal((await prisma.order.findUnique({ where: { id: retailOrder.id } })).status, 'PAID');
+  assert.equal(await prisma.cartItem.count({ where: { cartId: cart.id } }), 0);
+  assert.equal((await call(`/books/public/${bookId}`, 'buyer')).retailCopiesSold, 2);
+});
+
+test('author copies require owner and minimum five, discount 30%, never earn royalties or count as sales', async () => {
+  await call(`/books/${bookId}/author-copies/quote`, 'author', 'POST', { quantity: 4 }, 400);
+  await call(`/books/${bookId}/author-copies/quote`, 'outsider', 'POST', { quantity: 5 }, 403);
+  const quote = await call(`/books/${bookId}/author-copies/quote`, 'author', 'POST', { quantity: 5 });
+  assert.equal(Number(quote.quote.unitPrice), 174.3);
+  const body = { delivery, quantity: 5, paymentMethod: 'CARD', shippingMethod: 'STANDARD', checkoutKey: 'author-copies-key' };
+  copyOrder = (await call(`/books/${bookId}/author-copies/orders`, 'author', 'POST', body, 201)).order;
+  assert.equal(Number(copyOrder.totalPrice), 950.5); assert.equal(Number(copyOrder.items[0].authorEarnings), 0);
+  assert.equal((await call(`/books/${bookId}/author-copies/orders`, 'author', 'POST', body, 201)).order.id, copyOrder.id);
+  const started = await call(`/orders/${copyOrder.id}/payment/initiate`, 'author', 'POST', {});
+  attempts.get(started.payment.providerOrderId).state = 'COMPLETED';
+  await call(`/orders/${copyOrder.id}/payment/status`);
+  assert.equal((await call(`/books/public/${bookId}`, 'buyer')).retailCopiesSold, 2);
+});
+
+test('fulfilment enforces payment, stage ordering, tracking, role checks and immutable print proof', async () => {
+  await call('/orders/fulfilment', 'buyer', 'GET', undefined, 403);
+  assert.equal((await call('/orders/fulfilment', 'admin')).orders.length, 2);
+  await call(`/orders/${retailOrder.id}/fulfilment`, 'admin', 'PATCH', { status: 'SHIPPED', carrier: 'Test', trackingNumber: '1' }, 409);
+  await call(`/orders/${retailOrder.id}/fulfilment`, 'admin', 'PATCH', { status: 'PRINTING' });
+  await call(`/orders/${retailOrder.id}/fulfilment`, 'admin', 'PATCH', { status: 'SHIPPED' }, 409);
+  await call(`/orders/${retailOrder.id}/fulfilment`, 'admin', 'PATCH', { status: 'SHIPPED', carrier: 'Test', trackingNumber: 'TRACK123', trackingUrl: 'https://example.test/track/123' });
+  await call(`/orders/${retailOrder.id}/fulfilment`, 'admin', 'PATCH', { status: 'DELIVERED' });
+  const proof = await call(`/orders/${retailOrder.id}/items/${retailOrder.items[0].id}/proof`, 'admin');
+  assert.match(proof.revision.snapshot.chapters[0].content, /exact submitted/);
+  const order = (await call(`/orders/${retailOrder.id}`, 'buyer')).order;
+  assert.equal(order.trackingNumber, 'TRACK123');
+});
+
+test('paid resubmissions are free, changes do not alter purchased revisions or prices', async () => {
+  await call(`/books/${bookId}/revise`, 'author', 'POST', {});
+  await call(`/books/${bookId}`, 'author', 'PUT', { title: 'Revised title' });
+  const next = await call(`/books/${bookId}/submit-review`, 'author', 'POST', {}, 201);
+  assert.equal(next.book.status, 'IN_REVIEW'); assert.equal(next.review.status, 'SUBMITTED');
+  assert.equal(await prisma.publishingPayment.count({ where: { bookId } }), 1);
+  const proof = await call(`/orders/${retailOrder.id}/items/${retailOrder.items[0].id}/proof`, 'admin');
+  assert.equal(proof.revision.snapshot.book.title, 'Immutable book');
+  await call(`/reviews/${next.review.id}/request-changes`, 'admin', 'POST', { notes: 'Please fix the ending.' });
+  const again = await call(`/books/${bookId}/submit-review`, 'author', 'POST', {}, 201);
+  assert.equal(again.book.status, 'IN_REVIEW');
+  await call(`/reviews/${again.review.id}/approve`, 'admin', 'POST', { printCost: 90, pageCount: 150 });
+  await call(`/books/${bookId}/publish`, 'author', 'POST', { retailPrice: 249 });
+});
+
+test('bestseller starts at 1000 verified retail copies and excludes refunded/cancelled orders', async () => {
+  const original = await prisma.order.findUnique({ where: { id: retailOrder.id } });
+  await prisma.orderItem.update({ where: { id: retailOrder.items[0].id }, data: { qty: 1000 } });
+  assert.equal((await call(`/books/public/${bookId}`, 'buyer')).salesBadge, 'Bestseller');
+  await prisma.order.update({ where: { id: retailOrder.id }, data: { status: 'CANCELLED' } });
+  assert.equal((await call(`/books/public/${bookId}`, 'buyer')).retailCopiesSold, 0);
+  await prisma.order.update({ where: { id: retailOrder.id }, data: { status: original.status } });
+  await prisma.payment.updateMany({ where: { orderId: retailOrder.id }, data: { status: 'REFUNDED' } });
+  assert.equal((await call(`/books/public/${bookId}`, 'buyer')).retailCopiesSold, 0);
+});
+
+test('ambiguous gateway failures stay pending and cannot create another charge; verified failures permit retry', async () => {
+  const body = { delivery, quantity: 5, paymentMethod: 'UPI', shippingMethod: 'STANDARD', checkoutKey: 'ambiguous-attempt' };
+  const order = (await call(`/books/${bookId}/author-copies/orders`, 'author', 'POST', body, 201)).order;
+  failInitiation = true;
+  const started = await call(`/orders/${order.id}/payment/initiate`, 'author', 'POST', {});
+  const count = charges;
+  assert.equal(started.payment.status, 'PENDING'); assert.equal(started.gateway.redirectUrl, null);
+  await call(`/orders/${order.id}/payment/initiate`, 'author', 'POST', {});
+  assert.equal(charges, count);
+  attempts.get(started.payment.providerOrderId).state = 'FAILED';
+  failInitiation = false;
+  const retried = await call(`/orders/${order.id}/payment/initiate`, 'author', 'POST', {});
+  assert.notEqual(retried.payment.id, started.payment.id); assert.equal(charges, count + 1);
+});
+
+
+test('authenticated payment and refund webhooks are idempotent and ignore forged browser claims', async () => {
+  const { createHash } = require('node:crypto');
+  process.env.PHONEPE_WEBHOOK_USERNAME = 'test-webhook';
+  process.env.PHONEPE_WEBHOOK_PASSWORD = 'test-secret';
+  const authorization = createHash('sha256').update('test-webhook:test-secret').digest('hex');
+  const order = (await call(`/books/${bookId}/author-copies/orders`, 'author', 'POST', { delivery, quantity: 5, paymentMethod: 'UPI', shippingMethod: 'STANDARD', checkoutKey: 'webhook-test-order' }, 201)).order;
+  const start = await call(`/orders/${order.id}/payment/initiate`, 'author', 'POST', {});
+  const payload = { merchantOrderId: start.payment.providerOrderId, orderId: 'webhook-provider', state: 'COMPLETED', amount: 95050 };
+  const body = { event: 'checkout.order.completed', payload };
+  await call('/payments/phonepe/webhook', 'buyer', 'POST', body, 401);
+  assert.equal((await prisma.order.findUnique({ where: { id: order.id } })).status, 'PENDING');
+  await call('/payments/phonepe/webhook', 'buyer', 'POST', body, 200, { authorization });
+  await call('/payments/phonepe/webhook', 'buyer', 'POST', body, 200, { authorization });
+  assert.equal((await prisma.order.findUnique({ where: { id: order.id } })).status, 'PAID');
+  const refund = { event: 'pg.refund.completed', payload: { originalMerchantOrderId: start.payment.providerOrderId, refundId: 'test-refund', state: 'COMPLETED', amount: 95050 } };
+  await call('/payments/phonepe/webhook', 'buyer', 'POST', refund, 200, { authorization });
+  await call('/payments/phonepe/webhook', 'buyer', 'POST', refund, 200, { authorization });
+  assert.equal((await prisma.payment.findUnique({ where: { id: start.payment.id } })).status, 'REFUNDED');
+  await call(`/orders/${order.id}/fulfilment`, 'admin', 'PATCH', { status: 'PRINTING' }, 409);
+  await call('/payments/phonepe/webhook', 'buyer', 'POST', body, 200, { authorization });
+  assert.equal((await prisma.payment.findUnique({ where: { id: start.payment.id } })).status, 'REFUNDED');
+});
+
+test('legacy unpaid review migration preserves snapshots and requeues only after payment', async () => {
+  const legacy = await PGlite.create();
+  try {
+    await legacy.exec(fs.readFileSync(path.join(__dirname, '../prisma/migrations/20261015090000_postgres_baseline/migration.sql'), 'utf8'));
+    await legacy.exec(`INSERT INTO "User" (id,name,email,password) VALUES (1,'Legacy','legacy@example.test','unused');
+      INSERT INTO "Book" (id,"userId",title,language,"authorName",status,"updatedAt") VALUES (1,1,'Unpaid','English','Legacy','IN_REVIEW',NOW()), (2,1,'Paid','English','Legacy','APPROVED',NOW());
+      INSERT INTO "BookRevision" (id,"bookId",version,snapshot,"contentHash") VALUES (1,1,1,'{"original":true}','hash-1'),(2,2,1,'{"original":true}','hash-2');
+      INSERT INTO "BookReview" (id,"bookId","revisionId","submittedById",status) VALUES (1,1,1,1,'SUBMITTED'),(2,2,2,1,'APPROVED');
+      INSERT INTO "PublishingPayment" ("bookId","revisionId","userId",amount,currency,status,"updatedAt") VALUES (2,2,1,199,'INR','PAID',NOW());`);
+    for (const name of ['20261016090000_commerce', '20261016091000_review_fee_transition']) await legacy.exec(fs.readFileSync(path.join(__dirname, '../prisma/migrations', name, 'migration.sql'), 'utf8'));
+    const rows = (await legacy.query('SELECT id,status FROM "Book" ORDER BY id')).rows;
+    assert.deepEqual(rows, [{ id: 1, status: 'PAYMENT_PENDING' }, { id: 2, status: 'APPROVED' }]);
+    assert.equal((await legacy.query('SELECT status FROM "BookReview" WHERE id = 1')).rows[0].status, 'PAYMENT_PENDING');
+    assert.deepEqual((await legacy.query('SELECT snapshot FROM "BookRevision" WHERE id = 1')).rows[0].snapshot, { original: true });
+  } finally { await legacy.close(); }
+});

@@ -18,7 +18,8 @@
     "prisma:studio": "prisma studio",
     "prisma:db:pull": "prisma db pull",
     "prisma:db:push": "prisma db push",
-    "prisma:dev": "npm run prisma:migrate:dev && npm run prisma:generate"
+    "prisma:dev": "npm run prisma:migrate:dev && npm run prisma:generate",
+    "test:commerce": "npm run build && node scripts/prepare-commerce-tests.cjs && node --test tests/commerce.test.cjs"
   },
   "keywords": [],
   "author": "",
@@ -31,12 +32,15 @@
     "bcrypt@6.0.0": true
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.10",
     "@types/bcrypt": "^6.0.0",
     "@types/cookie-parser": "^1.4.9",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^24.3.0",
+    "node-mocks-http": "^1.18.1",
+    "pglite-prisma-adapter": "^0.6.1",
     "prisma": "^6.14.0",
     "ts-node": "^10.9.2",
     "ts-node-dev": "^2.0.0",

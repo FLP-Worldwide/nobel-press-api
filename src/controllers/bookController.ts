@@ -1,3 +1,4 @@
+import { withSales } from "../services/salesService";
 import { Response } from "express";
 import { Prisma } from "@prisma/client";
 import type {
@@ -11,6 +12,7 @@ import prisma from "../utils/prisma";
 import { AuthRequest } from "../middleware/authMiddleware";
 import {
   accessErrorResponse,
+  withEditableBook,
   requireOwnedBook,
   requireOwnedEditableBook,
 } from "../utils/bookAccess";
@@ -111,7 +113,7 @@ export const getAllBooks = async (_req: AuthRequest, res: Response) => {
       },
       orderBy: { publishedAt: "desc" },
     });
-    return res.json(books);
+    return res.json(await withSales(books));
   } catch (error) {
     console.error("getAllBooks error:", error);
     return res.status(500).json({ message: "Failed to fetch books" });
@@ -147,7 +149,7 @@ export const getPublicBookById = async (req: AuthRequest, res: Response) => {
       },
     });
     if (!book) return res.status(404).json({ message: "Published book not found" });
-    return res.json(book);
+    return res.json((await withSales([book]))[0]);
   } catch (error) {
     console.error("getPublicBookById error:", error);
     return res.status(500).json({ message: "Failed to fetch book" });
@@ -191,7 +193,7 @@ export const getUserBooks = async (req: AuthRequest, res: Response) => {
       include: authorBookInclude,
       orderBy: { updatedAt: "desc" },
     });
-    return res.json(books);
+    return res.json(await withSales(books));
   } catch (error) {
     console.error("getUserBooks error:", error);
     return res.status(500).json({ message: "Failed to fetch books" });
@@ -258,7 +260,7 @@ export const updateBook = async (req: AuthRequest, res: Response) => {
     if (Object.keys(data).length === 0) {
       return res.status(400).json({ message: "No supported fields provided to update" });
     }
-    const updated = await prisma.book.update({ where: { id }, data, include: authorBookInclude });
+    const updated = await withEditableBook(id, req.userId, tx => tx.book.update({ where: { id }, data, include: authorBookInclude }));
     return res.json(updated);
   } catch (error: any) {
     if (handleAccessError(error, res)) return;
@@ -295,7 +297,7 @@ export const upsertBookDesign = async (req: AuthRequest, res: Response) => {
     if (size === "CUSTOM" && (!customWidthIn || !customHeightIn)) {
       return res.status(400).json({ message: "Custom width and height are required" });
     }
-    const design = await prisma.bookDesign.upsert({
+    const design = await withEditableBook(bookId, req.userId, tx => tx.bookDesign.upsert({
       where: { bookId },
       create: {
         bookId, size, bindingType, interior, paperType, coverLamination, layoutStyle,
@@ -307,7 +309,7 @@ export const upsertBookDesign = async (req: AuthRequest, res: Response) => {
         customWidthIn: customWidthIn ? new Prisma.Decimal(customWidthIn) : null,
         customHeightIn: customHeightIn ? new Prisma.Decimal(customHeightIn) : null,
       },
-    });
+    }));
     return res.json(design);
   } catch (error) {
     if (handleAccessError(error, res)) return;
@@ -339,7 +341,7 @@ export const deleteBookDesign = async (req: AuthRequest, res: Response) => {
   if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
   try {
     await requireOwnedEditableBook(bookId, req.userId);
-    await prisma.bookDesign.delete({ where: { bookId } });
+    await withEditableBook(bookId, req.userId, tx => tx.bookDesign.delete({ where: { bookId } }));
     return res.json({ message: "Design deleted" });
   } catch (error: any) {
     if (handleAccessError(error, res)) return;
@@ -380,7 +382,7 @@ export const updateBookCovers = async (req: AuthRequest, res: Response) => {
     if (frontCoverUrl !== undefined) data.frontCoverUrl = frontCoverUrl || null;
     if (backCoverUrl !== undefined) data.backCoverUrl = backCoverUrl || null;
     if (!Object.keys(data).length) return res.status(400).json({ message: "No fields to update" });
-    const book = await prisma.book.update({ where: { id }, data, include: authorBookInclude });
+    const book = await withEditableBook(id, req.userId, tx => tx.book.update({ where: { id }, data, include: authorBookInclude }));
     return res.json({ message: "Covers updated", book });
   } catch (error) {
     if (handleAccessError(error, res)) return;
@@ -396,7 +398,7 @@ export const deleteBook = async (req: AuthRequest, res: Response) => {
   try {
     const book = await requireOwnedEditableBook(id, req.userId);
     if (book.deletedAt) return res.status(409).json({ message: "Book already deleted" });
-    await prisma.book.update({ where: { id }, data: { deletedAt: new Date(), deletedBy: req.userId } });
+    await withEditableBook(id, req.userId, tx => tx.book.update({ where: { id }, data: { deletedAt: new Date(), deletedBy: req.userId } }));
     return res.json({ ok: true, id, message: "Book deleted" });
   } catch (error) {
     if (handleAccessError(error, res)) return;

@@ -98,42 +98,33 @@ export const submitBookForReview = async (req: AuthRequest, res: Response) => {
 
   try {
     await requireOwnedBook(bookId, req.userId);
-    const book = await prisma.book.findUnique({
-      where: { id: bookId },
-      include: {
-        design: true,
-        chapters: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
-      },
-    });
-    if (!book) return res.status(404).json({ message: "Book not found" });
-    if (!SUBMITTABLE_STATUSES.includes(book.status)) {
-      return res.status(409).json({ message: `A book in ${book.status} cannot be submitted` });
-    }
-    const issues = buildSubmissionIssues(book);
-    if (issues.length) {
-      return res.status(422).json({ message: "Complete the book before submitting", issues });
-    }
-
-    const snapshot = buildSnapshot(book);
-    const contentHash = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
-    const latestRevision = await prisma.bookRevision.aggregate({
-      where: { bookId },
-      _max: { version: true },
-    });
-    const version = (latestRevision._max.version ?? 0) + 1;
-    const now = new Date();
-
     const result = await prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "Book" WHERE id = ${bookId} FOR UPDATE`;
+      const book = await tx.book.findFirst({ where: { id: bookId, userId: req.userId!, deletedAt: null },
+        include: { design: true, chapters: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] } } });
+      if (!book) throw new Error("NOT_FOUND");
+      if (!SUBMITTABLE_STATUSES.includes(book.status)) throw new Error("STATE_CHANGED");
+      const issues = buildSubmissionIssues(book);
+      if (issues.length) throw Object.assign(new Error("INCOMPLETE"), { issues });
+      const snapshot = buildSnapshot(book);
+      const contentHash = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+      const latest = await tx.bookRevision.aggregate({ where: { bookId }, _max: { version: true } });
+      const version = (latest._max.version ?? 0) + 1;
+      const now = new Date();
+      const paidFee = await tx.publishingPayment.findFirst({
+        where: { bookId, status: "PAID", amount: 199, currency: "INR" },
+      });
+      const nextStatus = paidFee ? BookStatus.IN_REVIEW : BookStatus.PAYMENT_PENDING;
       const transitioned = await tx.book.updateMany({
         where: { id: bookId, userId: req.userId!, updatedAt: book.updatedAt, status: { in: ["DRAFT", "CHANGES_REQUESTED"] } },
-        data: { status: "IN_REVIEW", submittedAt: now, approvedAt: null },
+        data: { status: nextStatus, submittedAt: now, approvedAt: null },
       });
       if (transitioned.count !== 1) throw new Error("STATE_CHANGED");
       const revision = await tx.bookRevision.create({
         data: { bookId, version, snapshot, contentHash },
       });
       const review = await tx.bookReview.create({
-        data: { bookId, revisionId: revision.id, submittedById: req.userId!, authorMessage },
+        data: { bookId, revisionId: revision.id, submittedById: req.userId!, authorMessage, status: paidFee ? "SUBMITTED" : "PAYMENT_PENDING" },
         include: { revision: { select: { id: true, version: true, contentHash: true } } },
       });
       await tx.bookStatusEvent.create({
@@ -141,15 +132,16 @@ export const submitBookForReview = async (req: AuthRequest, res: Response) => {
           bookId,
           actorId: req.userId!,
           previousStatus: book.status,
-          newStatus: "IN_REVIEW",
+          newStatus: nextStatus,
           notes: authorMessage,
         },
       });
       const updatedBook = await tx.book.findUnique({ where: { id: bookId } });
-      return { book: updatedBook, review, revision };
+      return { book: updatedBook, review, revision, reviewFee: { amount: 199, amountPaise: 19900, currency: "INR", paid: Boolean(paidFee) } };
     });
     return res.status(201).json(result);
   } catch (error: any) {
+    if (error?.message === "INCOMPLETE") return res.status(422).json({ message: "Complete the book before submitting", issues: error.issues });
     if (error?.message === "NOT_FOUND") return res.status(404).json({ message: "Book not found" });
     if (error?.message === "FORBIDDEN") return res.status(403).json({ message: "Forbidden" });
     if (error?.message === "STATE_CHANGED" || error?.code === "P2002") {
@@ -182,6 +174,7 @@ export const getBookReviewStatus = async (req: AuthRequest, res: Response) => {
       review,
       publishingPayment,
       publishingFee: { amount: 199, amountPaise: 19900, currency: "INR" },
+      reviewFee: { amount: 199, amountPaise: 19900, currency: "INR" },
     });
   } catch (error) {
     console.error("getBookReviewStatus error:", error);
@@ -250,20 +243,20 @@ async function applyDecision(
   reviewStatus: BookReviewStatus,
   bookStatus: BookStatus,
   notes: string | null,
+  pricing?: { pageCount: number; printCost: Prisma.Decimal },
 ) {
   return prisma.$transaction(async (tx) => {
     const review = await tx.bookReview.findUnique({ where: { id: reviewId } });
     if (!review) throw new Error("NOT_FOUND");
     if (review.status !== "SUBMITTED") throw new Error("ALREADY_REVIEWED");
-    const previousPayment = reviewStatus === "APPROVED" ? await tx.publishingPayment.findFirst({
-      where: { bookId: review.bookId, status: "PAID", amount: 199, currency: "INR" },
-    }) : null;
-    const nextStatus = previousPayment ? BookStatus.PUBLISHED : bookStatus;
+    const paidFee = await tx.publishingPayment.findFirst({ where: { bookId: review.bookId, status: "PAID", amount: 199, currency: "INR" } });
+    if (!paidFee) throw new Error("STATE_CHANGED");
+    const nextStatus = bookStatus;
     const transitioned = await tx.book.updateMany({
       where: { id: review.bookId, status: "IN_REVIEW" },
       data: {
         status: nextStatus,
-        ...(nextStatus === "PUBLISHED" ? { publishedAt: new Date() } : {}),
+        ...(pricing || {}),
         approvedAt: bookStatus === "APPROVED" ? new Date() : null,
       },
     });
@@ -288,8 +281,19 @@ function decisionHandler(reviewStatus: BookReviewStatus, bookStatus: BookStatus,
     if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
     const notes = typeof req.body?.notes === "string" ? req.body.notes.trim().slice(0, 5000) || null : null;
     if (requireNotes && !notes) return res.status(400).json({ message: "Reviewer notes are required" });
+    let pricing: { pageCount: number; printCost: Prisma.Decimal } | undefined;
+    if (reviewStatus === "APPROVED") {
+      const pageCount = Number(req.body?.pageCount);
+      const printCost = Number(req.body?.printCost);
+      if (typeof req.body?.pageCount === "boolean" || typeof req.body?.printCost === "boolean" || !Number.isInteger(pageCount) || pageCount < 1 || pageCount > 10000 ||
+          !Number.isFinite(printCost) || printCost <= 0 || printCost > 100000 ||
+          Math.abs(printCost * 100 - Math.round(printCost * 100)) > 0.000001) {
+        return res.status(400).json({ message: "Set the reviewed page count and printing cost per copy (up to two decimal places) before approval" });
+      }
+      pricing = { pageCount, printCost: new Prisma.Decimal(printCost) };
+    }
     try {
-      return res.json(await applyDecision(reviewId, req.userId, reviewStatus, bookStatus, notes));
+      return res.json(await applyDecision(reviewId, req.userId, reviewStatus, bookStatus, notes, pricing));
     } catch (error: any) {
       if (error?.message === "NOT_FOUND") return res.status(404).json({ message: "Review not found" });
       if (["ALREADY_REVIEWED", "STATE_CHANGED"].includes(error?.message)) {

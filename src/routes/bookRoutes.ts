@@ -23,7 +23,11 @@ import { createAuthorCopyOrder, quoteAuthorCopies } from "../controllers/authorC
 
 import { saveCoverDesign } from "../controllers/coverDesignController";
 
+import { getPricing, publishBook } from "../controllers/pricingController";
+
 const router = Router();
+router.get("/:id/pricing", authMiddleware, roleMiddleware("author", "admin"), getPricing);
+router.post("/:id/publish", authMiddleware, roleMiddleware("author"), publishBook);
 
 /* =========================
    Book routes

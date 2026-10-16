@@ -2,146 +2,89 @@ import { PaymentMethod, Prisma, ShippingMethod } from "@prisma/client";
 import { Response } from "express";
 import { AuthRequest } from "../middleware/authMiddleware";
 import prisma from "../utils/prisma";
+import { calculateOrderLine, getBookPricing } from "../utils/commerce";
+import { assertSameCheckout, deliverySnapshot, scopedCheckoutKey, serializable, validateDelivery } from "../services/checkoutService";
 
 const MAX_AUTHOR_COPIES = 100;
-
 function parseBookId(value: string): number | null {
   const id = Number(value);
   return Number.isInteger(id) && id > 0 ? id : null;
 }
-
 function parseQuantity(value: unknown): number | null {
   const quantity = Number(value);
-  return Number.isInteger(quantity) && quantity >= 1 && quantity <= MAX_AUTHOR_COPIES ? quantity : null;
+  return typeof value !== "boolean" && Number.isInteger(quantity) && quantity >= 1 && quantity <= MAX_AUTHOR_COPIES ? quantity : null;
 }
-
 function calculateQuote(book: any, quantity: number, shippingMethod: ShippingMethod) {
-  // Temporary v1 server tariff. The client never supplies any of these amounts.
-  let unitPrice = 149;
-  if (book.design?.bindingType === "HARDCOVER") unitPrice += 150;
-  if (book.design?.interior === "COLOR") unitPrice += 100;
-  if (["EIGHT_HALF_X_EIGHT_HALF", "EIGHT_HALF_X_ELEVEN"].includes(book.design?.size)) unitPrice += 50;
+  const pricing = getBookPricing(book);
+  if (quantity < pricing.authorCopyMinQty) throw new Error(`Order at least ${pricing.authorCopyMinQty} author copies`);
+  const item = calculateOrderLine(book, quantity, "AUTHOR_COPY");
   const shippingCharge = shippingMethod === "EXPRESS" ? 149 : 79;
-  const subtotal = unitPrice * quantity;
-  return {
-    pricingVersion: "author-copy-v1",
-    currency: "INR",
-    quantity,
-    unitPrice,
-    subtotal,
-    shippingCharge,
-    tax: 0,
-    total: subtotal + shippingCharge,
-  };
+  return { pricingVersion: "author-copy-v2", currency: "INR", quantity, minimumQuantity: pricing.authorCopyMinQty,
+    discountPercent: pricing.authorCopyDiscountPercent, retailPrice: pricing.retailPrice, unitPrice: item.unitPrice,
+    subtotal: item.lineTotal, shippingCharge, tax: 0,
+    total: new Prisma.Decimal(item.lineTotal).plus(shippingCharge).toNumber() };
 }
-
-async function getEligibleBook(bookId: number, userId: number) {
-  return prisma.book.findFirst({
-    where: { id: bookId, userId, status: "PUBLISHED", deletedAt: null },
-    include: { design: true },
-  });
-}
+const eligibleBookWhere = (bookId: number, userId: number) => ({ id: bookId, userId, status: "PUBLISHED" as const, deletedAt: null });
 
 export const quoteAuthorCopies = async (req: AuthRequest, res: Response) => {
   const bookId = parseBookId(req.params.id);
   const quantity = parseQuantity(req.body?.quantity);
-  const shippingMethod: ShippingMethod = req.body?.shippingMethod === "EXPRESS" ? "EXPRESS" : "STANDARD";
+  const shippingMethod = req.body?.shippingMethod || "STANDARD";
   if (!bookId) return res.status(400).json({ message: "Invalid book id" });
-  if (!quantity) return res.status(400).json({ message: `quantity must be between 1 and ${MAX_AUTHOR_COPIES}` });
+  if (!quantity) return res.status(400).json({ message: `quantity must be an integer between 1 and ${MAX_AUTHOR_COPIES}` });
+  if (!["STANDARD", "EXPRESS"].includes(shippingMethod)) return res.status(400).json({ message: "Invalid shipping method" });
   if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
   try {
-    const book = await getEligibleBook(bookId, req.userId);
+    const book = await prisma.book.findFirst({ where: eligibleBookWhere(bookId, req.userId) });
     if (!book) return res.status(403).json({ message: "Author copies are available only to the owner of a published book" });
     return res.json({ book: { id: book.id, title: book.title }, quote: calculateQuote(book, quantity, shippingMethod) });
-  } catch (error) {
-    console.error("quoteAuthorCopies error:", error);
-    return res.status(500).json({ message: "Failed to calculate author-copy quote" });
+  } catch (error: any) {
+    return res.status(error?.code ? 503 : 400).json({ message: error?.code ? "Quote is temporarily unavailable" : error.message });
   }
 };
-
-function requiredText(value: unknown, max: number): string | null {
-  if (typeof value !== "string") return null;
-  const cleaned = value.trim();
-  return cleaned && cleaned.length <= max ? cleaned : null;
-}
 
 export const createAuthorCopyOrder = async (req: AuthRequest, res: Response) => {
   const bookId = parseBookId(req.params.id);
   const quantity = parseQuantity(req.body?.quantity);
-  const shippingMethod: ShippingMethod = req.body?.shippingMethod === "EXPRESS" ? "EXPRESS" : "STANDARD";
-  const paymentMethod: PaymentMethod = req.body?.paymentMethod === "CARD" ? "CARD" : "UPI";
+  const shippingMethod: ShippingMethod = req.body?.shippingMethod || "STANDARD";
+  const paymentMethod: PaymentMethod = req.body?.paymentMethod || "UPI";
   if (!bookId) return res.status(400).json({ message: "Invalid book id" });
-  if (!quantity) return res.status(400).json({ message: `quantity must be between 1 and ${MAX_AUTHOR_COPIES}` });
+  if (!quantity) return res.status(400).json({ message: `quantity must be an integer between 1 and ${MAX_AUTHOR_COPIES}` });
   if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
-
-  const delivery = req.body?.delivery ?? {};
-  const details = {
-    name: requiredText(delivery.name, 160),
-    email: requiredText(delivery.email, 254),
-    phone: requiredText(delivery.phone, 30),
-    addressLine1: requiredText(delivery.addressLine1, 300),
-    addressLine2: typeof delivery.addressLine2 === "string" ? delivery.addressLine2.trim().slice(0, 300) || null : null,
-    city: requiredText(delivery.city, 120),
-    state: requiredText(delivery.state, 120),
-    postalCode: requiredText(delivery.postalCode, 20),
-    country: requiredText(delivery.country, 120),
-  };
-  if (Object.entries(details).some(([key, value]) => key !== "addressLine2" && !value)) {
-    return res.status(400).json({ message: "Complete delivery details are required" });
+  if (!["STANDARD", "EXPRESS"].includes(shippingMethod) || !["CARD", "UPI"].includes(paymentMethod)) {
+    return res.status(400).json({ message: "Invalid shipping or payment method" });
   }
-
   try {
-    const book = await getEligibleBook(bookId, req.userId);
-    if (!book) return res.status(403).json({ message: "Author copies are available only to the owner of a published book" });
-    const quote = calculateQuote(book, quantity, shippingMethod);
-    const order = await prisma.order.create({
-      data: {
-        userId: req.userId,
-        kind: "AUTHOR_COPY",
-        subtotal: new Prisma.Decimal(quote.subtotal),
-        savings: new Prisma.Decimal(0),
-        storePickup: new Prisma.Decimal(0),
-        shippingCharge: new Prisma.Decimal(quote.shippingCharge),
-        tax: new Prisma.Decimal(quote.tax),
-        totalPrice: new Prisma.Decimal(quote.total),
-        totalQty: quantity,
-        paymentMethod,
-        shippingMethod,
-        customerName: details.name!,
-        customerEmail: details.email!,
-        customerPhone: details.phone!,
-        addressLine1: details.addressLine1!,
-        addressLine2: details.addressLine2,
-        city: details.city!,
-        state: details.state!,
-        postalCode: details.postalCode!,
-        country: details.country!,
-        items: {
-          create: {
-            bookId,
-            unitPrice: new Prisma.Decimal(quote.unitPrice),
-            qty: quantity,
-            lineTotal: new Prisma.Decimal(quote.subtotal),
-          },
-        },
-        payments: {
-          create: {
-            userId: req.userId,
-            amount: new Prisma.Decimal(quote.total),
-            method: paymentMethod,
-            status: "PENDING",
-          },
-        },
-      },
-      include: { items: true, payments: true },
+    const userId = req.userId;
+    const delivery = validateDelivery(req.body?.delivery);
+    const checkoutKey = scopedCheckoutKey(req.get("Idempotency-Key") || req.body?.checkoutKey, userId, "AUTHOR_COPY");
+    const order = await serializable(async tx => {
+      const existing = await tx.order.findUnique({ where: { checkoutKey }, include: { items: true, payments: true } });
+      if (existing) {
+        if (existing.userId !== userId || existing.kind !== "AUTHOR_COPY" || existing.items.length !== 1 ||
+            existing.items[0].bookId !== bookId || existing.items[0].qty !== quantity) throw new Error("Checkout details changed. Start a new checkout.");
+        assertSameCheckout(existing, delivery, paymentMethod, shippingMethod);
+        return existing;
+      }
+      const book = await tx.book.findFirst({ where: eligibleBookWhere(bookId, userId), include: {
+        reviews: { where: { status: "APPROVED" }, orderBy: { reviewedAt: "desc" }, take: 1 },
+      } });
+      if (!book || !book.reviews[0]) throw new Error("Author copies are available only to the owner of a published book");
+      const quote = calculateQuote(book, quantity, shippingMethod);
+      const item = calculateOrderLine(book, quantity, "AUTHOR_COPY");
+      return tx.order.create({
+        data: {
+          userId, checkoutKey, kind: "AUTHOR_COPY", currency: "INR", subtotal: quote.subtotal,
+          savings: new Prisma.Decimal(book.retailPrice!).mul(quantity).minus(quote.subtotal), storePickup: 0,
+          shippingCharge: quote.shippingCharge, tax: quote.tax, totalPrice: quote.total, totalQty: quantity,
+          paymentMethod, shippingMethod, ...deliverySnapshot(delivery),
+          items: { create: { bookId, qty: quantity, ...item, revisionId: book.reviews[0].revisionId } },
+          payments: { create: { userId, amount: quote.total, method: paymentMethod, status: "PENDING", currency: "INR" } },
+        }, include: { items: true, payments: true },
+      });
     });
-    return res.status(201).json({
-      order,
-      quote,
-      message: "Author-copy order created. It remains pending until payment is verified.",
-    });
-  } catch (error) {
-    console.error("createAuthorCopyOrder error:", error);
-    return res.status(500).json({ message: "Failed to create author-copy order" });
+    return res.status(201).json({ order, message: "Author-copy order reserved. Complete payment to place your order." });
+  } catch (error: any) {
+    return res.status(error?.code ? 503 : 400).json({ message: error?.code ? "Checkout is temporarily unavailable" : error.message });
   }
 };

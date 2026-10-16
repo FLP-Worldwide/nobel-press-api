@@ -6,16 +6,17 @@ export interface PhonePeTokenResponse {
 }
 
 export const getPhonePeToken = async (): Promise<string> => {
-  const url = `${process.env.PHONEPE_BASE_URL}/v1/oauth/token`;
+  const url = process.env.PHONEPE_TOKEN_URL || `${process.env.PHONEPE_BASE_URL}/v1/oauth/token`;
 
   const params = new URLSearchParams();
   params.append("client_id", process.env.PHONEPE_CLIENT_ID || "");
-  params.append("client_version", process.env.PHONEPE_CLIENT_VERSION || "2023-01-01");
+  params.append("client_version", process.env.PHONEPE_CLIENT_VERSION || "1");
   params.append("client_secret", process.env.PHONEPE_CLIENT_SECRET || "");
   params.append("grant_type", "client_credentials");
 
   const response = await fetch(url, {
     method: "POST",
+    signal: AbortSignal.timeout(15000),
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
     },
