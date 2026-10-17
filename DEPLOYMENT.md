@@ -54,6 +54,14 @@ configure the existing PhonePe variables before accepting payments.
 
 ## Database schema
 
+Admin accounts are stored in the database. `ADMIN_EMAIL` and `ADMIN_PASSWORD`
+are server-side inputs for the trusted operator command, not a login bypass.
+After building, run `node --env-file=.env scripts/provision-admin.cjs` with the
+intended PostgreSQL connection. The command creates or promotes the specified
+account and sets its bcrypt-hashed password. Run it only when explicitly setting
+admin credentials; it is not part of deployment builds. Adding variables to
+Vercel alone does not provision an account.
+
 The active schema uses PostgreSQL. `20261015090000_postgres_baseline` creates all
 tables, constraints, review/payment models and cover artwork fields in an empty
 PostgreSQL database. Production Vercel builds apply it with `prisma migrate deploy`;

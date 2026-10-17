@@ -32,8 +32,9 @@ async function main() {
   }
 }
 
-main().catch(() => {
+main().catch((error) => {
   // Database errors may contain connection details; keep credentials out of logs.
   console.error('Admin provisioning failed. Check the supplied email, password, PostgreSQL connection and schema.');
+  if (/^P\d{4}$/.test(error?.code || '')) console.error(`Database error code: ${error.code}`);
   process.exitCode = 1;
 });
