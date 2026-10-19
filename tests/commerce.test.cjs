@@ -303,3 +303,30 @@ test('admin payments desk enforces roles, pagination, summaries and provider-onl
   assert.equal((await prisma.order.findUnique({ where: { id: pending.orderId } })).status, 'PAID');
   await call('/admin/payments/order/99999/verify', 'admin', 'POST', {}, 404);
 });
+
+test('author insights use paid retail snapshots, include archived titles and isolate authors', async () => {
+  await call('/author/dashboard', 'buyer', 'GET', undefined, 403);
+  await call('/author/dashboard', 'admin', 'GET', undefined, 403);
+  const baseline = await call('/author/dashboard');
+  const title = await prisma.book.create({ data: { userId: author.id, title: 'Archived sales', authorName: 'Author', language: 'English', deletedAt: new Date(), retailPrice: 999 } });
+  const otherTitle = await prisma.book.create({ data: { userId: outsider.id, title: 'Other author', authorName: 'Other', language: 'English' } });
+  const template = await prisma.order.findUnique({ where: { id: retailOrder.id } });
+  async function sale({ book = title.id, kind = 'RETAIL', status = 'PAID', paymentStatus = 'PAID', provider = 'PHONEPE', ref = true, earnings = '11.11', qty = 2 } = {}) {
+    return prisma.order.create({ data: { ...template, id: undefined, checkoutKey: null, kind, status,
+      items: { create: { bookId: book, title: 'Purchased title', qty, unitPrice: 30, lineTotal: 30 * qty, authorEarnings: earnings } },
+      payments: { create: { userId: buyer.id, amount: 60, method: 'UPI', status: paymentStatus, provider, providerRef: ref ? `insights-${require('node:crypto').randomUUID()}` : null } },
+    } });
+  }
+  await sale(); await sale({ earnings: null, qty: 1 });
+  await sale({ kind: 'AUTHOR_COPY' }); await sale({ status: 'CANCELLED' });
+  await sale({ paymentStatus: 'REFUNDED' }); await sale({ paymentStatus: 'PENDING' });
+  await sale({ provider: 'UNVERIFIED' }); await sale({ ref: false });
+  await sale({ book: otherTitle.id });
+  const summary = await call('/author/dashboard');
+  assert.equal(summary.retailCopiesSold, baseline.retailCopiesSold + 3);
+  assert.equal(Number(summary.accruedEarnings), Number(baseline.accruedEarnings) + 22.22);
+  assert.equal(summary.missingEarningsSnapshots, baseline.missingEarningsSnapshots + 1);
+  assert.equal(summary.books.find(row => row.bookId === title.id).revenue, '90.00');
+  assert.equal(summary.books.some(row => row.bookId === otherTitle.id), false);
+  assert.equal((await call('/author/dashboard', 'outsider')).retailCopiesSold, 2);
+});
