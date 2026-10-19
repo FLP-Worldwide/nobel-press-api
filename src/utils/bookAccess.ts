@@ -43,11 +43,11 @@ export function accessErrorResponse(error: unknown): { status: number; message: 
 export async function withEditableBook<T>(bookId: number, userId: number, operation: (tx: Prisma.TransactionClient) => Promise<T>) {
   return prisma.$transaction(async tx => {
     await tx.$queryRaw`SELECT id FROM "Book" WHERE id = ${bookId} FOR UPDATE`;
-    const book = await tx.book.findFirst({ where: { id: bookId, deletedAt: null } });
+    const book = await tx.book.findFirst({ where: { id: bookId, deletedAt: null }, select: { id: true, userId: true, status: true } });
     if (!book) throw new Error("NOT_FOUND");
     if (book.userId !== userId) throw new Error("FORBIDDEN");
     if (!isEditableBookStatus(book.status)) throw new Error("BOOK_LOCKED");
-    await tx.book.update({ where: { id: bookId }, data: { updatedAt: new Date() } });
+    await tx.book.update({ where: { id: bookId }, data: { updatedAt: new Date() }, select: { id: true } });
     return operation(tx);
   });
 }
