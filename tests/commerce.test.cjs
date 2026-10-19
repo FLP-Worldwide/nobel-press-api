@@ -330,3 +330,60 @@ test('author insights use paid retail snapshots, include archived titles and iso
   assert.equal(summary.books.some(row => row.bookId === otherTitle.id), false);
   assert.equal((await call('/author/dashboard', 'outsider')).retailCopiesSold, 2);
 });
+
+let longBookId;
+test('chapter creation scales past ten chapters without rewriting manuscript bodies', async () => {
+  const book = await prisma.book.create({ data: { userId: author.id, title: 'Long Hindi manuscript', authorName: 'Test', language: 'Hindi' } });
+  longBookId = book.id;
+  const oldDate = new Date('2026-01-01T00:00:00Z');
+  await prisma.bookChapter.createMany({ data: Array.from({ length: 40 }, (_, index) => ({ bookId: book.id, title: `Chapter ${index + 1}`, type: 'chapter', position: index * 2,
+    content: `<p>${'एक नई कहानी। '.repeat(500)}</p>`, updatedAt: oldDate })) });
+  const before = await prisma.bookChapter.findMany({ where: { bookId: book.id }, orderBy: { position: 'asc' } });
+  // Simulate the per-query latency that makes a row-by-row reorder expire on
+  // hosted databases. Bulk SQL must finish within a short interactive budget.
+  const realTransaction = prisma.$transaction.bind(prisma);
+  prisma.$transaction = (operation, options) => realTransaction(tx => operation(new Proxy(tx, {
+    get(target, property) {
+      if (property === 'bookChapter') return new Proxy(target.bookChapter, {
+        get(model, key) {
+          if (key === 'update') return async args => { await new Promise(resolve => setTimeout(resolve, 70)); return model.update(args); };
+          return model[key];
+        },
+      });
+      const value = target[property]; return typeof value === 'function' ? value.bind(target) : value;
+    },
+  })), { ...options, timeout: 1000 });
+  let appended;
+  try { appended = await call(`/chapters/${book.id}`, 'author', 'POST', { title: 'Chapter 41', type: 'chapter', content: '' }, 201, { 'idempotency-key': 'long-chapter-append' }); }
+  finally { prisma.$transaction = realTransaction; }
+  assert.equal(appended.position, 40);
+  const originals = await prisma.bookChapter.findMany({ where: { id: { in: before.map(item => item.id) } }, orderBy: { id: 'asc' } });
+  for (const item of originals) {
+    assert.equal(item.content, before.find(old => old.id === item.id).content);
+    assert.equal(item.updatedAt.toISOString(), oldDate.toISOString(), 'Adding a chapter must not make existing manuscripts look edited');
+  }
+  const added = await call(`/chapters/${book.id}`, 'author', 'POST', { title: 'Inserted section', type: 'section', content: '', afterChapterId: before[4].id }, 201, { 'idempotency-key': 'long-section-insert' });
+  const ordered = await call(`/chapters/${book.id}`);
+  assert.equal(ordered[5].id, added.id);
+  assert.deepEqual(ordered.map(item => item.position), Array.from({ length: 42 }, (_, index) => index));
+  assert.deepEqual(ordered.filter(item => item.id !== added.id && item.id !== appended.id).map(item => item.id), before.map(item => item.id));
+});
+
+test('chapter retries are idempotent, authorization and stale-anchor errors remain safe', async () => {
+  const original = await prisma.bookChapter.findFirst({ where: { bookId: longBookId }, orderBy: { position: 'asc' } });
+  const payload = { title: 'Retry-safe chapter', type: 'chapter', content: 'A new beginning', afterChapterId: original.id };
+  const headers = { 'idempotency-key': 'same-chapter-request' };
+  const first = await call(`/chapters/${longBookId}`, 'author', 'POST', payload, 201, headers);
+  const second = await call(`/chapters/${longBookId}`, 'author', 'POST', payload, 201, headers);
+  assert.equal(first.id, second.id);
+  assert.equal(await prisma.bookChapter.count({ where: { bookId: longBookId, creationKey: headers['idempotency-key'] } }), 1);
+  await call(`/chapters/${longBookId}`, 'author', 'POST', { ...payload, title: 'Different operation' }, 409, headers);
+  await call(`/chapters/${longBookId}`, 'outsider', 'POST', payload, 403, headers);
+  await call(`/chapters/${longBookId}`, 'buyer', 'POST', payload, 403, headers);
+  const invalid = await call(`/chapters/${longBookId}`, 'author', 'POST', { ...payload, afterChapterId: 999999 }, 409, { 'idempotency-key': 'stale-anchor-request' });
+  assert.equal(invalid.code, 'CHAPTER_LIST_CHANGED');
+  await call(`/chapters/${longBookId}`, 'author', 'POST', payload, 400, { 'idempotency-key': 'bad key' });
+  await prisma.book.update({ where: { id: longBookId }, data: { status: 'IN_REVIEW' } });
+  const locked = await call(`/chapters/${longBookId}`, 'author', 'POST', payload, 409);
+  assert.equal(locked.code, 'BOOK_LOCKED');
+});

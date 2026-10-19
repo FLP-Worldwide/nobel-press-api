@@ -1,4 +1,5 @@
 import { Response } from "express";
+import { createHash } from "crypto";
 import { AuthRequest } from "../middleware/authMiddleware";
 import prisma from "../utils/prisma";
 import { accessErrorResponse, requireOwnedEditableBook, withEditableBook } from "../utils/bookAccess";
@@ -14,7 +15,7 @@ function parseId(value: string): number | null {
 function sendAccessError(error: unknown, res: Response): boolean {
   const mapped = accessErrorResponse(error);
   if (!mapped) return false;
-  res.status(mapped.status).json({ message: mapped.message });
+  res.status(mapped.status).json({ message: mapped.message, code: error instanceof Error ? error.message : undefined });
   return true;
 }
 
@@ -31,6 +32,10 @@ export const addChapter = async (req: AuthRequest, res: Response) => {
   const content = validateContent(req.body?.content ?? "");
   const type = req.body?.type;
   const afterChapterId = req.body?.afterChapterId;
+  const creationKey = req.get("Idempotency-Key") || null;
+  if (creationKey !== null && !/^[A-Za-z0-9_.:-]{8,128}$/.test(creationKey)) {
+    return res.status(400).json({ message: "Please refresh the editor before adding another chapter", code: "INVALID_CREATION_KEY" });
+  }
   if (afterChapterId !== undefined && (!Number.isInteger(afterChapterId) || afterChapterId < 1)) {
     return res.status(400).json({ message: "Invalid section to insert after" });
   }
@@ -39,26 +44,42 @@ export const addChapter = async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    await requireOwnedEditableBook(bookId, req.userId);
-    if (afterChapterId !== undefined && !await prisma.bookChapter.findFirst({ where: { id: afterChapterId, bookId } })) {
-      return res.status(400).json({ message: "The preceding section must belong to this book." });
-    }
+    const creationHash = createHash("sha256").update(JSON.stringify({ title, type, content, afterChapterId })).digest("hex");
     const chapter = await withEditableBook(bookId, req.userId, async (tx) => {
-      // Serialize insertions for one book so concurrent tabs cannot overwrite order.
-      await tx.book.update({ where: { id: bookId }, data: { updatedAt: new Date() } });
-      const existing = await tx.bookChapter.findMany({ where: { bookId }, orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }] });
-      const insertion = afterChapterId === undefined ? existing.length : existing.findIndex(item => item.id === afterChapterId) + 1;
-      if (afterChapterId !== undefined && insertion === 0) throw new Error("The preceding section was removed.");
-      for (let index = 0; index < existing.length; index++) {
-        await tx.bookChapter.update({ where: { id: existing[index].id }, data: { position: index >= insertion ? index + 1 : index } });
+      // withEditableBook already locks the book row against submissions and
+      // concurrent additions. The operation key makes ambiguous retries safe.
+      if (creationKey) {
+        const previous = await tx.bookChapter.findUnique({ where: { bookId_creationKey: { bookId, creationKey } } });
+        if (previous) {
+          if (previous.creationHash !== creationHash) throw new Error("CREATION_KEY_REUSED");
+          return previous;
+        }
       }
-      return tx.bookChapter.create({ data: { bookId, title, type, content, position: insertion } });
+      // Chapter bodies can be megabytes. Ordering needs identifiers only.
+      const existing = await tx.bookChapter.findMany({ where: { bookId }, select: { id: true }, orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }] });
+      const insertion = afterChapterId === undefined ? existing.length : existing.findIndex(item => item.id === afterChapterId) + 1;
+      if (afterChapterId !== undefined && insertion === 0) throw new Error("PRECEDING_SECTION_MISSING");
+      // Normalize legacy gaps/duplicate positions and shift the insertion tail
+      // in one database round trip. Do not touch manuscript text or updatedAt.
+      await tx.$executeRaw`
+        WITH ordered AS (
+          SELECT id, (ROW_NUMBER() OVER (ORDER BY position, "createdAt", id) - 1)::integer AS ordinal
+          FROM "BookChapter" WHERE "bookId" = ${bookId}
+        )
+        UPDATE "BookChapter" AS chapter
+        SET position = ordered.ordinal + CASE WHEN ordered.ordinal >= ${insertion} THEN 1 ELSE 0 END
+        FROM ordered
+        WHERE chapter.id = ordered.id
+          AND chapter.position <> ordered.ordinal + CASE WHEN ordered.ordinal >= ${insertion} THEN 1 ELSE 0 END`;
+      return tx.bookChapter.create({ data: { bookId, title, type, content, position: insertion, creationKey, creationHash: creationKey ? creationHash : null } });
     });
     return res.status(201).json(chapter);
-  } catch (error) {
+  } catch (error: any) {
     if (sendAccessError(error, res)) return;
-    console.error("addChapter error:", error);
-    return res.status(500).json({ message: "Failed to add chapter" });
+    if (error?.message === "PRECEDING_SECTION_MISSING") return res.status(409).json({ message: "The chapter list changed. Refresh the list before adding another chapter.", code: "CHAPTER_LIST_CHANGED" });
+    if (error?.message === "CREATION_KEY_REUSED") return res.status(409).json({ message: "Please refresh the chapter list before starting another chapter.", code: "CREATION_KEY_REUSED" });
+    console.error("addChapter error:", { code: error?.code || "CHAPTER_CREATE_ERROR", bookId });
+    return res.status(503).json({ message: "We couldn't add your chapter right now. Please try again in a moment.", code: "CHAPTER_CREATE_UNAVAILABLE", retryable: true });
   }
 };
 

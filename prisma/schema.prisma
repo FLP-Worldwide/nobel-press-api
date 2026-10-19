@@ -170,10 +170,14 @@ model BookChapter {
   type      ChapterType
   content   String      @db.Text
   position  Int         @default(0)
+  creationKey String?   @db.VarChar(128)
+  creationHash String?  @db.VarChar(64)
   createdAt DateTime    @default(now())
   updatedAt DateTime    @default(now()) @updatedAt
 
   book Book @relation(fields: [bookId], references: [id])
+
+  @@unique([bookId, creationKey])
 }
 
 /**
