@@ -9,6 +9,7 @@ import checkoutRoutes from "./routes/checkoutRoutes";
 import paymentsRoutes from "./routes/payments";
 import reviewRoutes from "./routes/reviewRoutes";
 import orderRoutes from "./routes/orderRoutes";
+import adminRoutes from "./routes/adminRoutes";
 
 import cartRoute from './routes/cartRoutes';
 import cookieParser from "cookie-parser";
@@ -52,6 +53,7 @@ app.use("/api/checkout", checkoutRoutes);
 app.use("/api/payments", paymentsRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/admin", adminRoutes);
 
 app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err?.type === "entity.too.large") {

@@ -53,7 +53,7 @@ export const signup = async (req: Request, res: Response) => {
   }
 };
 
-export const login = async (req: Request, res: Response) => {
+const loginFor = (adminOnly: boolean) => async (req: Request, res: Response) => {
   const email = cleanString(req.body?.email).toLowerCase();
   const password = typeof req.body?.password === "string" ? req.body.password : "";
 
@@ -68,6 +68,16 @@ export const login = async (req: Request, res: Response) => {
     const match = await bcrypt.compare(password, storedUser.password);
     if (!match) return res.status(401).json({ message: "Invalid credentials" });
 
+    if (adminOnly && storedUser.role !== "admin") {
+      return res.status(403).json({ message: "This sign in is for administrators only" });
+    }
+    if (!adminOnly && storedUser.role === "admin") {
+      return res.status(403).json({ message: "Use Admin sign in for this account" });
+    }
+    if (!adminOnly && req.body?.accountType && req.body.accountType !== storedUser.role) {
+      return res.status(403).json({ message: storedUser.role === "buyer" ? "Use Reader sign in for this account" : "Use Author sign in for this account" });
+    }
+
     const { password: _password, ...user } = storedUser;
     const token = generateToken(user.id);
     return res.json({ user, token });
@@ -76,6 +86,9 @@ export const login = async (req: Request, res: Response) => {
     return res.status(500).json({ message: "Something went wrong" });
   }
 };
+
+export const login = loginFor(false);
+export const adminLogin = loginFor(true);
 
 export const getProfile = async (req: AuthRequest, res: Response) => {
   try {

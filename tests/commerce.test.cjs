@@ -260,3 +260,46 @@ test('legacy unpaid review migration preserves snapshots and requeues only after
     assert.deepEqual((await legacy.query('SELECT snapshot FROM "BookRevision" WHERE id = 1')).rows[0].snapshot, { original: true });
   } finally { await legacy.close(); }
 });
+
+test('staff sign in is separate and admin manuscript mutations are forbidden', async () => {
+  const hash = await require('bcrypt').hash('isolated-login-password', 4);
+  await prisma.user.updateMany({ where: { id: { in: [admin.id, author.id, buyer.id] } }, data: { password: hash } });
+  const credentials = { email: admin.email, password: 'isolated-login-password' };
+  assert.equal((await call('/auth/admin/login', 'admin', 'POST', credentials)).user.role, 'admin');
+  await call('/auth/login', 'admin', 'POST', credentials, 403);
+  await call('/auth/admin/login', 'author', 'POST', { ...credentials, email: author.email }, 403);
+  await call('/auth/admin/login', 'buyer', 'POST', { ...credentials, email: buyer.email }, 403);
+  await call('/auth/admin/login', 'admin', 'POST', { ...credentials, password: 'incorrect' }, 401);
+  assert.equal((await call('/auth/login', 'author', 'POST', { ...credentials, email: author.email, accountType: 'author' })).user.role, 'author');
+  await call('/auth/login', 'author', 'POST', { ...credentials, email: author.email, accountType: 'buyer' }, 403);
+  for (const [route, method] of [['/books', 'POST'], [`/books/${bookId}`, 'PUT'], [`/books/${bookId}/cover-design`, 'PUT'], [`/chapters/${bookId}`, 'POST'], [`/books/${bookId}/publish`, 'POST']]) {
+    await call(route, 'admin', method, {}, 403);
+  }
+});
+
+test('admin payments desk enforces roles, pagination, summaries and provider-only verification', async () => {
+  for (const role of ['author', 'buyer']) {
+    await call('/admin/payments', role, 'GET', undefined, 403);
+    await call('/admin/payments/order/1/verify', role, 'POST', {}, 403);
+  }
+  for (const query of ['flow=invalid', 'status=invalid', 'page=-1', 'page=1.5']) await call(`/admin/payments?${query}`, 'admin', 'GET', undefined, 400);
+  const fees = await call('/admin/payments?flow=review&status=PAID', 'admin');
+  assert.equal(fees.payments.length, 1); assert.equal(Number(fees.summary.find(row => row.status === 'PAID')._sum.amount), 199);
+  assert.equal(fees.payments[0].user.email, author.email);
+  assert.equal(fees.payments[0].user.password, undefined);
+  const all = await call('/admin/payments?flow=order', 'admin');
+  assert.equal(all.total, await prisma.payment.count());
+  assert.equal((await call('/admin/payments?flow=order&page=2', 'admin')).payments.length, 0);
+  const pending = await prisma.payment.findFirst({ where: { status: 'PENDING' }, orderBy: { id: 'desc' } });
+  const count = charges;
+  const result = await call(`/admin/payments/order/${pending.id}/verify`, 'admin', 'POST', { status: 'PAID' });
+  assert.equal(result.payment.status, 'PENDING', 'A browser claim cannot mark a payment paid');
+  assert.equal(charges, count, 'Verification must never initiate a charge');
+  const attempt = attempts.get(pending.providerOrderId);
+  attempt.state = 'COMPLETED'; attempt.amount = 1;
+  await call(`/admin/payments/order/${pending.id}/verify`, 'admin', 'POST', {}, 502);
+  attempt.amount = Number(pending.amount) * 100;
+  assert.equal((await call(`/admin/payments/order/${pending.id}/verify`, 'admin', 'POST', {})).payment.status, 'PAID');
+  assert.equal((await prisma.order.findUnique({ where: { id: pending.orderId } })).status, 'PAID');
+  await call('/admin/payments/order/99999/verify', 'admin', 'POST', {}, 404);
+});
