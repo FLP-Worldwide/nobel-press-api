@@ -1,5 +1,7 @@
 // Fail the build if the generated client or native dependencies cannot load.
 // This imports every route without listening on a port or touching the database.
+// Run with --no-experimental-require-module: Vercel's loader cannot use Node's
+// optional CommonJS-to-ESM bridge. A plain local import alone missed that crash.
 const assert = require('node:assert/strict');
 const app = require('../dist/app.js').default;
 const bcrypt = require('bcrypt');
