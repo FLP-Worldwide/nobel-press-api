@@ -387,3 +387,98 @@ test('chapter retries are idempotent, authorization and stale-anchor errors rema
   const locked = await call(`/chapters/${longBookId}`, 'author', 'POST', payload, 409);
   assert.equal(locked.code, 'BOOK_LOCKED');
 });
+
+async function reviewReadyBook() {
+  return prisma.book.create({ data: { userId: author.id, title: 'Long review manuscript', language: 'Hindi', authorName: 'Test Author', description: 'A complete test book', authorBiography: 'Test biography', categories: ['Fiction'], keywords: ['कहानी'], termsAcceptedAt: new Date(), frontCoverUrl: 'https://example.test/cover.png',
+    design: { create: { size: 'FIVE_X_EIGHT', bindingType: 'PAPERBACK', interior: 'BLACK_WHITE', paperType: 'CREAM', coverLamination: 'MATTE' } },
+    chapters: { create: Array.from({ length: 40 }, (_, position) => ({ title: `अध्याय ${position + 1}`, type: 'chapter', position, content: `<p>${'एक नई कहानी। '.repeat(1000)}</p>` })) },
+  } });
+}
+
+test('large review submissions prepare bodies outside the transaction and retries reuse the locked submission', async () => {
+  const book = await reviewReadyBook();
+  const realTransaction = prisma.$transaction.bind(prisma);
+  let preparedOutside = false;
+  const findBook = prisma.book.findFirst;
+  prisma.book.findFirst = async args => {
+    if (args.include?.chapters) { preparedOutside = true; await new Promise(resolve => setTimeout(resolve, 100)); }
+    return findBook.call(prisma.book, args);
+  };
+  prisma.$transaction = (operation, options) => {
+    assert.ok(preparedOutside, 'Manuscript reading/preparation must happen before the write transaction');
+    assert.equal(options.timeout, 15000, 'Submission needs an explicit bounded budget for hosted database latency');
+    return realTransaction(tx => operation(new Proxy(tx, {
+      get(target, property) {
+        if (property === 'book') return new Proxy(target.book, { get(model, key) {
+          if (key === 'findFirst') return args => { assert.equal(args.include, undefined, 'Do not re-read all chapter bodies under the lock'); return model.findFirst(args); };
+          return model[key];
+        } });
+        if (property === 'bookRevision') return new Proxy(target.bookRevision, { get(model, key) {
+          if (key === 'create') return args => { assert.ok(args.select && !args.select.snapshot, 'Do not return the full immutable manuscript on creation'); return model.create(args); };
+          return model[key];
+        } });
+        const value = target[property]; return typeof value === 'function' ? value.bind(target) : value;
+      },
+    })), options);
+  };
+  let first;
+  try { first = await call(`/books/${book.id}/submit-review`, 'author', 'POST', {}, 201); }
+  finally { prisma.$transaction = realTransaction; prisma.book.findFirst = findBook; }
+  assert.equal(first.book.status, 'PAYMENT_PENDING');
+  assert.equal(first.revision.snapshot, undefined);
+  const proof = await prisma.bookRevision.findUnique({ where: { id: first.revision.id } });
+  assert.equal(proof.snapshot.chapters.length, 40);
+  assert.match(proof.snapshot.chapters[39].content, /एक नई कहानी/);
+  const again = await call(`/books/${book.id}/submit-review`, 'author', 'POST', {}, 201);
+  assert.equal(again.review.id, first.review.id); assert.equal(again.alreadySubmitted, true);
+  assert.equal(await prisma.bookRevision.count({ where: { bookId: book.id } }), 1);
+  assert.equal(await prisma.bookStatusEvent.count({ where: { bookId: book.id } }), 1);
+  assert.equal(await prisma.publishingPayment.count({ where: { bookId: book.id } }), 0);
+  await call(`/books/${book.id}/submit-review`, 'outsider', 'POST', {}, 403);
+  await call(`/books/${book.id}/submit-review`, 'buyer', 'POST', {}, 403);
+});
+
+test('submission rejects a draft changed after snapshot preparation without locking or saving a stale revision', async () => {
+  const book = await reviewReadyBook();
+  const findBook = prisma.book.findFirst;
+  let edited = false;
+  prisma.book.findFirst = async args => {
+    const result = await findBook.call(prisma.book, args);
+    if (args.include?.chapters && !edited) {
+      edited = true;
+      await prisma.book.update({ where: { id: book.id }, data: { title: 'A concurrent edit', updatedAt: new Date(result.updatedAt.getTime() + 1000) } });
+    }
+    return result;
+  };
+  let response;
+  try { response = await call(`/books/${book.id}/submit-review`, 'author', 'POST', {}, 409); }
+  finally { prisma.book.findFirst = findBook; }
+  assert.equal(response.code, 'BOOK_CHANGED');
+  assert.equal((await prisma.book.findUnique({ where: { id: book.id } })).status, 'DRAFT');
+  assert.equal(await prisma.bookRevision.count({ where: { bookId: book.id } }), 0);
+});
+
+test('submission timeout rolls back all writes, offers safe recovery and succeeds once on retry', async () => {
+  const book = await reviewReadyBook();
+  const realTransaction = prisma.$transaction.bind(prisma);
+  prisma.$transaction = (operation, options) => realTransaction(tx => operation(new Proxy(tx, {
+    get(target, property) {
+      if (property === 'bookStatusEvent') return new Proxy(target.bookStatusEvent, { get(model, key) {
+        if (key === 'create') return () => { throw Object.assign(new Error('Private database timeout details'), { code: 'P2028' }); };
+        return model[key];
+      } });
+      const value = target[property]; return typeof value === 'function' ? value.bind(target) : value;
+    },
+  })), options);
+  let failed;
+  try { failed = await call(`/books/${book.id}/submit-review`, 'author', 'POST', {}, 503); }
+  finally { prisma.$transaction = realTransaction; }
+  assert.equal(failed.code, 'SUBMISSION_UNAVAILABLE'); assert.equal(failed.retryable, true);
+  assert.doesNotMatch(JSON.stringify(failed), /Private|Prisma|P2028/);
+  assert.equal((await prisma.book.findUnique({ where: { id: book.id } })).status, 'DRAFT');
+  assert.equal(await prisma.bookRevision.count({ where: { bookId: book.id } }), 0);
+  assert.equal(await prisma.bookReview.count({ where: { bookId: book.id } }), 0);
+  assert.equal(await prisma.bookStatusEvent.count({ where: { bookId: book.id } }), 0);
+  await call(`/books/${book.id}/submit-review`, 'author', 'POST', {}, 201);
+  assert.equal(await prisma.bookReview.count({ where: { bookId: book.id } }), 1);
+});

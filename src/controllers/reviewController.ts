@@ -97,58 +97,79 @@ export const submitBookForReview = async (req: AuthRequest, res: Response) => {
     : null;
 
   try {
-    await requireOwnedBook(bookId, req.userId);
+    // Read and prepare the manuscript before opening the write transaction.
+    // Every author edit locks this same book row and advances updatedAt; the
+    // guarded transition below rejects a snapshot changed during preparation.
+    const book = await prisma.book.findFirst({
+      where: { id: bookId, deletedAt: null },
+      include: { design: true, chapters: { orderBy: [{ position: "asc" }, { createdAt: "asc" }, { id: "asc" }] } },
+    });
+    if (!book) throw new Error("NOT_FOUND");
+    if (book.userId !== req.userId) throw new Error("FORBIDDEN");
+    const issues = SUBMITTABLE_STATUSES.includes(book.status) ? buildSubmissionIssues(book) : [];
+    const snapshot = SUBMITTABLE_STATUSES.includes(book.status) && !issues.length ? buildSnapshot(book) : null;
+    const contentHash = snapshot ? createHash("sha256").update(JSON.stringify(snapshot)).digest("hex") : null;
+    const revisionSummary = { id: true, version: true, contentHash: true } as const;
     const result = await prisma.$transaction(async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Book" WHERE id = ${bookId} FOR UPDATE`;
-      const book = await tx.book.findFirst({ where: { id: bookId, userId: req.userId!, deletedAt: null },
-        include: { design: true, chapters: { orderBy: [{ position: "asc" }, { createdAt: "asc" }] } } });
-      if (!book) throw new Error("NOT_FOUND");
-      if (!SUBMITTABLE_STATUSES.includes(book.status)) throw new Error("STATE_CHANGED");
-      const issues = buildSubmissionIssues(book);
+      const current = await tx.book.findFirst({
+        where: { id: bookId, deletedAt: null },
+        select: { id: true, userId: true, status: true, updatedAt: true, submittedAt: true },
+      });
+      if (!current) throw new Error("NOT_FOUND");
+      if (current.userId !== req.userId) throw new Error("FORBIDDEN");
+      // A lost response or concurrent double click must return the one saved
+      // submission, without creating a revision, status event or payment again.
+      if (current.status === BookStatus.PAYMENT_PENDING || current.status === BookStatus.IN_REVIEW) {
+        const review = await tx.bookReview.findFirst({
+          where: { bookId, status: current.status === BookStatus.IN_REVIEW ? "SUBMITTED" : "PAYMENT_PENDING" },
+          orderBy: { submittedAt: "desc" },
+          include: { revision: { select: revisionSummary } },
+        });
+        if (!review) throw new Error("STATE_CHANGED");
+        return { book: current, review, revision: review.revision, alreadySubmitted: true,
+          reviewFee: { amount: 199, amountPaise: 19900, currency: "INR", paid: current.status === BookStatus.IN_REVIEW } };
+      }
+      if (!SUBMITTABLE_STATUSES.includes(current.status) ||
+          current.status !== book.status || current.updatedAt.getTime() !== book.updatedAt.getTime()) throw new Error("STATE_CHANGED");
       if (issues.length) throw Object.assign(new Error("INCOMPLETE"), { issues });
-      const snapshot = buildSnapshot(book);
-      const contentHash = createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
+      if (!snapshot || !contentHash) throw new Error("STATE_CHANGED");
       const latest = await tx.bookRevision.aggregate({ where: { bookId }, _max: { version: true } });
       const version = (latest._max.version ?? 0) + 1;
       const now = new Date();
       const paidFee = await tx.publishingPayment.findFirst({
-        where: { bookId, status: "PAID", amount: 199, currency: "INR" },
+        where: { bookId, status: "PAID", amount: 199, currency: "INR" }, select: { id: true },
       });
       const nextStatus = paidFee ? BookStatus.IN_REVIEW : BookStatus.PAYMENT_PENDING;
       const transitioned = await tx.book.updateMany({
-        where: { id: bookId, userId: req.userId!, updatedAt: book.updatedAt, status: { in: ["DRAFT", "CHANGES_REQUESTED"] } },
+        where: { id: bookId, userId: req.userId!, updatedAt: book.updatedAt, status: book.status, deletedAt: null },
         data: { status: nextStatus, submittedAt: now, approvedAt: null },
       });
       if (transitioned.count !== 1) throw new Error("STATE_CHANGED");
       const revision = await tx.bookRevision.create({
-        data: { bookId, version, snapshot, contentHash },
+        data: { bookId, version, snapshot, contentHash }, select: revisionSummary,
       });
       const review = await tx.bookReview.create({
         data: { bookId, revisionId: revision.id, submittedById: req.userId!, authorMessage, status: paidFee ? "SUBMITTED" : "PAYMENT_PENDING" },
-        include: { revision: { select: { id: true, version: true, contentHash: true } } },
+        include: { revision: { select: revisionSummary } },
       });
       await tx.bookStatusEvent.create({
-        data: {
-          bookId,
-          actorId: req.userId!,
-          previousStatus: book.status,
-          newStatus: nextStatus,
-          notes: authorMessage,
-        },
+        data: { bookId, actorId: req.userId!, previousStatus: book.status, newStatus: nextStatus, notes: authorMessage },
+        select: { id: true },
       });
-      const updatedBook = await tx.book.findUnique({ where: { id: bookId } });
-      return { book: updatedBook, review, revision, reviewFee: { amount: 199, amountPaise: 19900, currency: "INR", paid: Boolean(paidFee) } };
-    });
+      return { book: { id: bookId, status: nextStatus, submittedAt: now }, review, revision,
+        reviewFee: { amount: 199, amountPaise: 19900, currency: "INR", paid: Boolean(paidFee) } };
+    }, { maxWait: 5000, timeout: 15000 });
     return res.status(201).json(result);
   } catch (error: any) {
-    if (error?.message === "INCOMPLETE") return res.status(422).json({ message: "Complete the book before submitting", issues: error.issues });
+    if (error?.message === "INCOMPLETE") return res.status(422).json({ message: "A few book details still need your attention.", code: "SUBMISSION_INCOMPLETE", issues: error.issues });
     if (error?.message === "NOT_FOUND") return res.status(404).json({ message: "Book not found" });
     if (error?.message === "FORBIDDEN") return res.status(403).json({ message: "Forbidden" });
     if (error?.message === "STATE_CHANGED" || error?.code === "P2002") {
-      return res.status(409).json({ message: "The book changed while it was being submitted. Refresh and try again." });
+      return res.status(409).json({ message: "Your book changed while we were preparing it. Check your latest changes and submit again.", code: "BOOK_CHANGED" });
     }
-    console.error("submitBookForReview error:", error);
-    return res.status(500).json({ message: "Failed to submit book for review" });
+    console.error("submitBookForReview failed", { bookId, code: error?.code || "UNKNOWN" });
+    return res.status(503).json({ message: "We couldn’t confirm your submission. Your saved draft is safe. Please try again in a moment.", code: "SUBMISSION_UNAVAILABLE", retryable: true });
   }
 };
 
