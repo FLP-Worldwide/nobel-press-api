@@ -5,6 +5,7 @@ import { Response } from "express";
 import { AuthRequest } from "../middleware/authMiddleware";
 import prisma from "../utils/prisma";
 import { requireOwnedBook } from "../utils/bookAccess";
+import { reviewFeePolicy, reviewPaymentsAreDemo } from "../services/reviewFeePolicy";
 
 const SUBMITTABLE_STATUSES: BookStatus[] = [BookStatus.DRAFT, BookStatus.CHANGES_REQUESTED];
 
@@ -120,7 +121,7 @@ export const submitBookForReview = async (req: AuthRequest, res: Response) => {
       await tx.$queryRaw`SELECT id FROM "Book" WHERE id = ${bookId} FOR UPDATE`;
       const current = await tx.book.findFirst({
         where: { id: bookId, deletedAt: null },
-        select: { id: true, userId: true, status: true, updatedAt: true, submittedAt: true },
+        select: { id: true, userId: true, status: true, updatedAt: true, submittedAt: true, reviewFeeWaivedAt: true },
       });
       if (!current) throw new Error("NOT_FOUND");
       if (current.userId !== req.userId) throw new Error("FORBIDDEN");
@@ -134,7 +135,7 @@ export const submitBookForReview = async (req: AuthRequest, res: Response) => {
         });
         if (!review) throw new Error("STATE_CHANGED");
         return { book: current, review, revision: review.revision, alreadySubmitted: true,
-          reviewFee: { amount: 199, amountPaise: 19900, currency: "INR", paid: current.status === BookStatus.IN_REVIEW } };
+          reviewFee: { ...reviewFeePolicy(current), paid: !current.reviewFeeWaivedAt && current.status === BookStatus.IN_REVIEW } };
       }
       if (!SUBMITTABLE_STATUSES.includes(current.status) ||
           current.status !== book.status || current.updatedAt.getTime() !== book.updatedAt.getTime()) throw new Error("STATE_CHANGED");
@@ -146,25 +147,28 @@ export const submitBookForReview = async (req: AuthRequest, res: Response) => {
       const paidFee = await tx.publishingPayment.findFirst({
         where: { bookId, status: "PAID", amount: 199, currency: "INR" }, select: { id: true },
       });
-      const nextStatus = paidFee ? BookStatus.IN_REVIEW : BookStatus.PAYMENT_PENDING;
+      const waivedAt = current.reviewFeeWaivedAt || (!paidFee && reviewPaymentsAreDemo() ? now : null);
+      const eligible = Boolean(paidFee || waivedAt);
+      const nextStatus = eligible ? BookStatus.IN_REVIEW : BookStatus.PAYMENT_PENDING;
       const transitioned = await tx.book.updateMany({
         where: { id: bookId, userId: req.userId!, updatedAt: book.updatedAt, status: book.status, deletedAt: null },
-        data: { status: nextStatus, submittedAt: now, approvedAt: null },
+        data: { status: nextStatus, submittedAt: now, approvedAt: null, reviewFeeWaivedAt: waivedAt },
       });
       if (transitioned.count !== 1) throw new Error("STATE_CHANGED");
       const revision = await tx.bookRevision.create({
         data: { bookId, version, snapshot, contentHash }, select: revisionSummary,
       });
       const review = await tx.bookReview.create({
-        data: { bookId, revisionId: revision.id, submittedById: req.userId!, authorMessage, status: paidFee ? "SUBMITTED" : "PAYMENT_PENDING" },
+        data: { bookId, revisionId: revision.id, submittedById: req.userId!, authorMessage, status: eligible ? "SUBMITTED" : "PAYMENT_PENDING" },
         include: { revision: { select: revisionSummary } },
       });
       await tx.bookStatusEvent.create({
-        data: { bookId, actorId: req.userId!, previousStatus: book.status, newStatus: nextStatus, notes: authorMessage },
+        data: { bookId, actorId: req.userId!, previousStatus: book.status, newStatus: nextStatus,
+          notes: waivedAt ? ["Review fee waived in demo mode. No payment collected.", authorMessage].filter(Boolean).join("\n") : authorMessage },
         select: { id: true },
       });
       return { book: { id: bookId, status: nextStatus, submittedAt: now }, review, revision,
-        reviewFee: { amount: 199, amountPaise: 19900, currency: "INR", paid: Boolean(paidFee) } };
+        reviewFee: { ...reviewFeePolicy({ reviewFeeWaivedAt: waivedAt }), paid: Boolean(paidFee) } };
     }, { maxWait: 5000, timeout: 15000 });
     return res.status(201).json(result);
   } catch (error: any) {
@@ -201,8 +205,8 @@ export const getBookReviewStatus = async (req: AuthRequest, res: Response) => {
       status: book.status,
       review,
       publishingPayment,
-      publishingFee: { amount: 199, amountPaise: 19900, currency: "INR" },
-      reviewFee: { amount: 199, amountPaise: 19900, currency: "INR" },
+      publishingFee: reviewFeePolicy(book),
+      reviewFee: reviewFeePolicy(book),
     });
   } catch (error) {
     console.error("getBookReviewStatus error:", error);
@@ -278,7 +282,8 @@ async function applyDecision(
     if (!review) throw new Error("NOT_FOUND");
     if (review.status !== "SUBMITTED") throw new Error("ALREADY_REVIEWED");
     const paidFee = await tx.publishingPayment.findFirst({ where: { bookId: review.bookId, status: "PAID", amount: 199, currency: "INR" } });
-    if (!paidFee) throw new Error("STATE_CHANGED");
+    const feeBook = await tx.book.findUnique({ where: { id: review.bookId }, select: { reviewFeeWaivedAt: true } });
+    if (!paidFee && !feeBook?.reviewFeeWaivedAt) throw new Error("STATE_CHANGED");
     const nextStatus = bookStatus;
     const transitioned = await tx.book.updateMany({
       where: { id: review.bookId, status: "IN_REVIEW" },

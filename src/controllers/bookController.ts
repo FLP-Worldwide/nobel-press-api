@@ -1,3 +1,4 @@
+import { reviewFeePolicy } from "../services/reviewFeePolicy";
 import { nativeTitleIssue } from "../utils/bookLanguage";
 import { withSales } from "../services/salesService";
 import { Response } from "express";
@@ -225,7 +226,7 @@ export const getBookById = async (req: AuthRequest, res: Response) => {
     if (req.role !== "admin" && book.userId !== req.userId) {
       return res.status(403).json({ message: "Forbidden" });
     }
-    return res.json(book);
+    return res.json({ ...book, reviewFee: reviewFeePolicy(book) });
   } catch (error) {
     console.error("getBookById error:", error);
     return res.status(500).json({ message: "Failed to fetch book" });

@@ -135,6 +135,7 @@ model Book {
   categories      Json?
   keywords        Json?
   termsAcceptedAt DateTime?
+  reviewFeeWaivedAt DateTime?
   pageCount       Int?
   printCost       Decimal?      @db.Decimal(12, 2)
   retailPrice     Decimal?      @db.Decimal(12, 2)

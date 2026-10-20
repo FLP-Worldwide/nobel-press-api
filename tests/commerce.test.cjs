@@ -32,6 +32,7 @@ before(async () => {
   process.env.nobel_book_api_DATABASE_URL = '';
   process.env.JWT_SECRET = 'isolated-commerce-test-only';
   process.env.NODE_ENV = 'test';
+  process.env.REVIEW_PAYMENT_MODE = 'live';
   process.env.VERCEL = '';
   process.env.PHONEPE_BASE_URL = 'https://mock-phonepe.invalid';
   process.env.PHONEPE_TOKEN_URL = `${process.env.PHONEPE_BASE_URL}/v1/oauth/token`;
@@ -572,4 +573,66 @@ test('new regional titles use their script, Roman spellings persist, and review 
  assert.equal(callback.searchParams.get('publishingBookId'),ready.publicId);
  const status=await call(`/books/${ready.publicId}/review-status`);
  assert.equal(status.bookPublicId,ready.publicId);assert.equal(status.review.id,submission.review.id);
+});
+
+async function demoReadyBook(title) {
+  return prisma.book.create({ data: { userId: author.id, title, language: 'English', authorName: 'Test Author',
+    description: 'A test book', authorBiography: 'Test biography', genre: 'Fiction', keywords: ['test'],
+    termsAcceptedAt: new Date(), frontCoverUrl: 'https://example.test/cover.png',
+    design: { create: { size: 'FIVE_X_EIGHT', bindingType: 'PAPERBACK', interior: 'BLACK_WHITE', paperType: 'CREAM', coverLamination: 'MATTE' } },
+    chapters: { create: { title: 'Chapter one', type: 'chapter', content: '<p>A complete test manuscript.</p>' } } } });
+}
+
+test('demo review waiver submits, approves and publishes without fabricating revenue; retail still requires payment', async () => {
+  const chargedBefore = charges;
+  process.env.REVIEW_PAYMENT_MODE = 'demo';
+  try {
+    const draft = await demoReadyBook('Demo fee waiver');
+    const policy = await call(`/books/${draft.publicId}`);
+    assert.equal(policy.reviewFee.mode, 'demo');
+    const result = await call(`/books/${draft.publicId}/submit-review`, 'author', 'POST', {}, 201);
+    assert.equal(result.book.status, 'IN_REVIEW'); assert.equal(result.reviewFee.waived, true);
+    assert.equal(result.reviewFee.paid, false);
+    const retry = await call(`/books/${draft.publicId}/submit-review`, 'author', 'POST', {}, 201);
+    assert.equal(retry.review.id, result.review.id); assert.equal(retry.reviewFee.paid, false);
+    assert.equal(await prisma.publishingPayment.count({ where: { bookId: draft.id } }), 0);
+    assert.equal(charges, chargedBefore);
+    await call(`/books/${draft.publicId}/publish`, 'author', 'POST', { retailPrice: 249 }, 409);
+    await call(`/reviews/${result.review.id}/approve`, 'admin', 'POST', { pageCount: 120, printCost: 90 });
+    assert.equal((await call(`/books/${draft.publicId}/pricing`)).canPublish, true);
+    await call(`/books/${draft.publicId}/publish`, 'author', 'POST', { retailPrice: 249 });
+    // The author-copy order is still unpaid, even while review fees are waived.
+    const order = await call(`/books/${draft.publicId}/author-copies/orders`, 'author', 'POST',
+      { quantity: 5, delivery, paymentMethod: 'UPI', shippingMethod: 'STANDARD', checkoutKey: 'demo-author-copies-order' }, 201);
+    assert.equal(order.order.status, 'PENDING');
+    process.env.REVIEW_PAYMENT_MODE = 'live';
+    await call(`/books/${draft.publicId}/revise`, 'author', 'POST', {});
+    const revision = await call(`/books/${draft.publicId}/submit-review`, 'author', 'POST', {}, 201);
+    assert.equal(revision.book.status, 'IN_REVIEW'); assert.equal(revision.reviewFee.waived, true);
+    assert.equal(await prisma.publishingPayment.count({ where: { bookId: draft.id } }), 0);
+  } finally { process.env.REVIEW_PAYMENT_MODE = 'live'; }
+});
+
+test('existing pending submissions can continue in demo mode once, without bypassing ownership or unresolved charges', async () => {
+  const draft = await demoReadyBook('Existing pending demo');
+  await call(`/books/${draft.publicId}/submit-review`, 'author', 'POST', { demo: true }, 201);
+  assert.equal((await prisma.book.findUnique({ where: { id: draft.id } })).status, 'PAYMENT_PENDING');
+  process.env.REVIEW_PAYMENT_MODE = 'demo';
+  try {
+    await call(`/books/${draft.publicId}/publishing-payment/initiate`, 'outsider', 'POST', {}, 409);
+    await call(`/books/${draft.publicId}/publishing-payment/initiate`, 'buyer', 'POST', {}, 403);
+    for (let i = 0; i < 2; i++) {
+      const result = await call(`/books/${draft.publicId}/publishing-payment/initiate`, 'author', 'POST', {});
+      assert.equal(result.bookStatus, 'IN_REVIEW'); assert.equal(result.reviewFee.waived, true);
+    }
+    assert.equal(await prisma.bookStatusEvent.count({ where: { bookId: draft.id, newStatus: 'IN_REVIEW' } }), 1);
+    assert.equal(await prisma.publishingPayment.count({ where: { bookId: draft.id } }), 0);
+    process.env.REVIEW_PAYMENT_MODE = 'live';
+    const pending = await demoReadyBook('Unresolved charge');
+    await call(`/books/${pending.publicId}/submit-review`, 'author', 'POST', {}, 201);
+    await call(`/books/${pending.publicId}/publishing-payment/initiate`, 'author', 'POST', {});
+    process.env.REVIEW_PAYMENT_MODE = 'demo';
+    await call(`/books/${pending.publicId}/publishing-payment/initiate`, 'author', 'POST', {}, 409);
+    assert.equal((await prisma.book.findUnique({ where: { id: pending.id } })).reviewFeeWaivedAt, null);
+  } finally { process.env.REVIEW_PAYMENT_MODE = 'live'; }
 });

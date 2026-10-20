@@ -9,7 +9,7 @@ export const getPricing = async (req: AuthRequest, res: Response) => {
     const book = await prisma.book.findFirst({ where: { id: Number(req.params.id), userId: req.userId, deletedAt: null } });
     if (!book) return res.status(404).json({ message: "Book not found" });
     const paid = await prisma.publishingPayment.count({ where: { bookId: book.id, status: "PAID", amount: 199, currency: "INR" } });
-    return res.json({ pricing: getBookPricing(book), canPublish: book.status === "APPROVED" && paid > 0 });
+    return res.json({ pricing: getBookPricing(book), canPublish: book.status === "APPROVED" && (paid > 0 || Boolean(book.reviewFeeWaivedAt)) });
   } catch (error: any) { return res.status(400).json({ message: error.code ? "Pricing is unavailable" : error.message }); }
 };
 
@@ -21,7 +21,7 @@ export const publishBook = async (req: AuthRequest, res: Response) => {
       if (!book || !["APPROVED", "PUBLISHED"].includes(book.status)) throw new Error("An approved book is required");
       const review = await tx.bookReview.findFirst({ where: { bookId: book.id }, orderBy: { submittedAt: "desc" } });
       const paid = await tx.publishingPayment.findFirst({ where: { bookId: book.id, status: "PAID", amount: 199, currency: "INR" } });
-      if (!paid || review?.status !== "APPROVED") throw new Error("Verified review payment and approval are required");
+      if ((!paid && !book.reviewFeeWaivedAt) || review?.status !== "APPROVED") throw new Error("Review fee clearance and editorial approval are required");
       if (price.lt(getBookPricing(book).minimumSellingPrice)) throw new Error("Selling price must cover discounted author-copy printing costs");
       if (book.status === "PUBLISHED") {
         if (book.retailPrice?.equals(price)) return book;
