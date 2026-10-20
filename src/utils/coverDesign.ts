@@ -12,6 +12,10 @@ export function validateCoverDesign(input:any):Prisma.InputJsonObject{
   if(JSON.stringify(input).length>4_500_000)fail('The cover design is too large. Use smaller images.');
   const width=number(input.width,100,2000,'canvas width'),height=number(input.height,100,3000,'canvas height');
   const output:any={version:1,width,height};
+  if(input.print !== undefined){
+    if(!input.print||typeof input.print.confirmed!=='boolean')fail('Confirm the printer spine specification');
+    output.print={spineWidthMm:number(input.print.spineWidthMm,0,101.6,'printer spine width'),confirmed:input.print.confirmed};
+  }
   for(const side of ['front','back']){
     const panel=input[side];if(!panel||!Array.isArray(panel.elements)||panel.elements.length>40)fail('Use up to 40 layers per cover');
     const ids=new Set<string>();

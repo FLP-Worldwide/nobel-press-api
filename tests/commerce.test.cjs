@@ -42,7 +42,7 @@ before(async () => {
     if (url.pathname === '/checkout/v2/pay') {
       charges++;
       const body = JSON.parse(options.body);
-      if (!attempts.has(body.merchantOrderId)) attempts.set(body.merchantOrderId, { state: 'PENDING', amount: body.amount, orderId: `provider-${charges}` });
+      if (!attempts.has(body.merchantOrderId)) attempts.set(body.merchantOrderId, { state: 'PENDING', amount: body.amount, orderId: `provider-${charges}`, returnUrl: body.paymentFlow?.merchantUrls?.redirectUrl });
       if (failInitiation) return Response.json({ message: 'Ambiguous provider failure' }, { status: 500 });
       return Response.json({ redirectUrl: `https://pay.example.test/${body.merchantOrderId}` });
     }
@@ -481,4 +481,95 @@ test('submission timeout rolls back all writes, offers safe recovery and succeed
   assert.equal(await prisma.bookStatusEvent.count({ where: { bookId: book.id } }), 0);
   await call(`/books/${book.id}/submit-review`, 'author', 'POST', {}, 201);
   assert.equal(await prisma.bookReview.count({ where: { bookId: book.id } }), 1);
+});
+
+test('Word imports append in one transaction, sanitize content and reuse a lost-response retry without changing existing chapters', async()=>{
+  const book = await prisma.book.create({data:{userId:author.id,title:'Imported book',authorName:'Author',language:'Hindi',chapters:{create:{title:'Existing',type:'chapter',content:'<p>Keep this text</p>',position:0}}}});
+  const original=await prisma.bookChapter.findFirst({where:{bookId:book.id}});
+  const sections=Array.from({length:40},(_,i)=>({title:`अध्याय ${i+1}`,type:'chapter',content:`<p>एक नई कहानी ${i+1}। <strong>जुड़ा हुआ अक्षर</strong></p>`}));
+  sections[0].content='<p onclick="alert(1)">Safe <strong>bold</strong><script>secret()</script><a href="javascript:alert(1)">link</a></p><img src="https://example.test/tracker.png"><table><tr><td>Cell text</td></tr></table>';
+  const payload={sections,importKey:'word-import-request-1',expectedUpdatedAt:book.updatedAt.toISOString()};
+  const first=await call(`/books/${book.id}/manuscript-import`,'author','POST',payload,201);
+  assert.equal(first.importedCount,40);assert.equal(first.alreadyImported,false);
+  const saved=await prisma.bookChapter.findMany({where:{bookId:book.id},orderBy:{position:'asc'}});
+  assert.equal(saved.length,41);assert.equal(saved[0].id,original.id);assert.equal(saved[0].content,original.content);assert.equal(saved[0].updatedAt.toISOString(),original.updatedAt.toISOString());
+  assert.doesNotMatch(saved[1].content,/onclick|script|javascript|tracker/);assert.match(saved[1].content,/<strong>bold<\/strong>/);assert.match(saved[1].content,/<td>Cell text<\/td>/);
+  assert.deepEqual(saved.map(c=>c.position),Array.from({length:41},(_,i)=>i));
+  const retry=await call(`/books/${book.id}/manuscript-import`,'author','POST',payload,201);
+  assert.equal(retry.alreadyImported,true);assert.deepEqual(retry.chapters.map(c=>c.id),first.chapters.map(c=>c.id));
+  assert.equal(await prisma.bookChapter.count({where:{bookId:book.id}}),41);
+  await call(`/books/${book.id}/manuscript-import`,'outsider','POST',payload,403);
+  await call(`/books/${book.id}/manuscript-import`,'admin','POST',payload,403);
+  await call(`/books/${book.id}/manuscript-import`,'author','POST',{...payload,sections:[{title:'Changed',type:'chapter',content:'<p>Different operation</p>'}]},409);
+  const stale=await call(`/books/${book.id}/manuscript-import`,'author','POST',{...payload,importKey:'another-upload-operation'},409);
+  assert.equal(stale.code,'BOOK_CHANGED');
+  await prisma.book.update({where:{id:book.id},data:{status:'IN_REVIEW'}});
+  const current=await prisma.book.findUnique({where:{id:book.id}});
+  await call(`/books/${book.id}/manuscript-import`,'author','POST',{...payload,importKey:'locked-book-operation',expectedUpdatedAt:current.updatedAt.toISOString()},409);
+  const committed=await call(`/books/${book.id}/manuscript-import`,'author','POST',payload,201);
+  assert.equal(committed.alreadyImported,true);
+});
+
+test('an import that fails after creation rolls back every section and the book timestamp',async()=>{
+  const book=await prisma.book.create({data:{userId:author.id,title:'Atomic import',authorName:'Author',language:'English'}});
+  const payload={sections:[{title:'First',type:'chapter',content:'<p>Test</p>'},{title:'Second',type:'chapter',content:'<p>More</p>'}],importKey:'atomic-import-request',expectedUpdatedAt:book.updatedAt.toISOString()};
+  const realTransaction=prisma.$transaction.bind(prisma);
+  prisma.$transaction=(operation,options)=>realTransaction(tx=>operation(new Proxy(tx,{get(target,property){
+    if(property==='book') return new Proxy(target.book,{get(model,key){if(key==='update')return()=>{throw Object.assign(Error('Injected timeout'),{code:'P2028'});};return model[key];}});
+    const value=target[property];return typeof value==='function'?value.bind(target):value;
+  }})),options);
+  try {const failed=await call(`/books/${book.id}/manuscript-import`,'author','POST',payload,503);assert.equal(failed.retryable,true);}finally{prisma.$transaction=realTransaction;}
+  assert.equal(await prisma.bookChapter.count({where:{bookId:book.id}}),0);
+  assert.equal((await prisma.book.findUnique({where:{id:book.id}})).updatedAt.toISOString(),book.updatedAt.toISOString());
+  await call(`/books/${book.id}/manuscript-import`,'author','POST',payload,201);
+});
+
+test('copyright details remain author controlled and are frozen in the submitted revision',async()=>{
+  const book=await reviewReadyBook();
+  await call(`/books/${book.id}`,'author','PUT',{copyrightHolder:'Test Rights Holder',copyrightYear:2026,copyrightNotice:'Cover illustration by Test Artist'});
+  await call(`/books/${book.id}`,'author','PUT',{copyrightYear:1200},400);
+  const result=await call(`/books/${book.id}/submit-review`,'author','POST',{},201);
+  const revision=await prisma.bookRevision.findUnique({where:{id:result.revision.id}});
+  assert.equal(revision.snapshot.book.copyrightHolder,'Test Rights Holder');
+  assert.equal(revision.snapshot.book.copyrightYear,2026);assert.equal(revision.snapshot.book.copyrightNotice,'Cover illustration by Test Artist');
+  await call(`/books/${book.id}`,'author','PUT',{copyrightHolder:'Changed after submission'},409);
+});
+
+test('book URLs resolve cryptographically random public references without bypassing ownership, locks or checkout identity',async()=>{
+ const book=await prisma.book.create({data:{userId:author.id,title:'Private reference',authorName:'Test',language:'English'}});
+ assert.match(book.publicId,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+ assert.notEqual(book.publicId,String(book.id));
+ assert.equal((await call(`/books/${book.publicId}`)).id,book.id);
+ assert.equal((await call(`/books/${book.publicId}`)).publicId,book.publicId);
+ await call(`/books/${book.publicId}`,'outsider','GET',undefined,403);
+ await call(`/books/${book.publicId}`,'buyer','GET',undefined,403);
+ const chapter=await call(`/chapters/${book.publicId}`,'author','POST',{title:'A chapter',type:'chapter',content:'<p>Text</p>'},201);
+ assert.equal(chapter.bookId,book.id);assert.equal((await call(`/chapters/${book.publicId}`)).length,1);
+ await call(`/chapters/${book.publicId}`,'outsider','GET',undefined,403);
+ await call(`/books/${book.publicId}/design`,'author','PUT',{size:'FIVE_X_EIGHT',bindingType:'PAPERBACK',interior:'BLACK_WHITE',paperType:'CREAM',coverLamination:'MATTE'});
+ assert.equal((await call(`/books/${book.publicId}/design`)).bookId,book.id);
+ await call(`/books/public/${book.publicId}`,'buyer','GET',undefined,404);
+ await call('/books/00000000-0000-4000-8000-000000000000','author','GET',undefined,404);
+ await call('/books/not-a-book-reference','author','GET',undefined,404);
+ await prisma.book.update({where:{id:book.id},data:{status:'IN_REVIEW'}});
+ await call(`/chapters/${book.publicId}`,'author','POST',{title:'Locked',type:'chapter',content:''},409);
+ const published=await prisma.book.findUnique({where:{id:bookId}});
+ assert.equal((await call(`/books/public/${published.publicId}`,'buyer')).id,bookId);
+});
+
+test('new regional titles use their script, Roman spellings persist, and review payments return via the opaque book reference',async()=>{
+ const invalid=await call('/books','author','POST',{title:'Tum hi se tum tak',language:'Hindi',authorName:'लेखक'},400);
+ assert.equal(invalid.code,'NATIVE_TITLE_REQUIRED');
+ const created=await call('/books','author','POST',{title:'तुम ही से — तुम तक',titleRoman:'Tum hi se — tum tak',language:'हिंदी',authorName:'लेखक',authorNameRoman:'Author'},201);
+ assert.equal(created.title,'तुम ही से — तुम तक');assert.equal(created.titleRoman,'Tum hi se — tum tak');assert.equal(created.authorNameRoman,'Author');
+ await call(`/books/${created.publicId}`,'author','PUT',{title:'Roman only'},400);
+ await call(`/books/${created.publicId}`,'author','PUT',{title:'नई शुरुआत',titleRoman:'Nayi shuruaat'});
+ assert.equal((await call(`/books/${created.publicId}`)).titleRoman,'Nayi shuruaat');
+ const ready=await reviewReadyBook();
+ const submission=await call(`/books/${ready.publicId}/submit-review`,'author','POST',{},201);
+ const payment=await call(`/books/${ready.publicId}/publishing-payment/initiate`,'author','POST',{});
+ const callback=new URL(attempts.get(payment.payment.providerOrderId).returnUrl);
+ assert.equal(callback.searchParams.get('publishingBookId'),ready.publicId);
+ const status=await call(`/books/${ready.publicId}/review-status`);
+ assert.equal(status.bookPublicId,ready.publicId);assert.equal(status.review.id,submission.review.id);
 });

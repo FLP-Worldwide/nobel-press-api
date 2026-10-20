@@ -45,7 +45,10 @@ function buildSnapshot(book: any): Prisma.InputJsonObject {
     schemaVersion: 1,
     book: {
       id: book.id,
+      publicId: book.publicId,
       title: book.title,
+      titleRoman: book.titleRoman ?? null,
+      authorNameRoman: book.authorNameRoman ?? null,
       subheading: book.subheading,
       language: book.language,
       authorName: book.authorName,
@@ -53,6 +56,9 @@ function buildSnapshot(book: any): Prisma.InputJsonObject {
       genre: book.genre,
       description: book.description,
       authorBiography: book.authorBiography,
+      copyrightHolder: book.copyrightHolder || [book.authorName, book.coAuthor].filter(Boolean).join(" & "),
+      copyrightYear: book.copyrightYear ?? new Date().getUTCFullYear(),
+      copyrightNotice: book.copyrightNotice ?? null,
       categories: book.categories ?? [],
       keywords: book.keywords ?? [],
       retailPrice: book.retailPrice?.toString() ?? null,
@@ -191,6 +197,7 @@ export const getBookReviewStatus = async (req: AuthRequest, res: Response) => {
     ]);
     return res.json({
       bookId,
+      bookPublicId: book.publicId,
       status: book.status,
       review,
       publishingPayment,

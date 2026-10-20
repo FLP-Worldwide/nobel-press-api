@@ -117,8 +117,11 @@ model User {
 
 model Book {
   id              Int           @id @default(autoincrement())
+  publicId        String        @unique @default(uuid()) @db.Uuid
   userId          Int
   title           String
+  titleRoman      String?       @db.VarChar(200)
+  authorNameRoman String?       @db.VarChar(160)
   language        String
   authorName      String
   subheading      String?
@@ -126,6 +129,9 @@ model Book {
   genre           String?
   description     String?       @db.Text
   authorBiography String?       @db.Text
+  copyrightHolder String?       @db.VarChar(160)
+  copyrightYear   Int?
+  copyrightNotice String?       @db.Text
   categories      Json?
   keywords        Json?
   termsAcceptedAt DateTime?

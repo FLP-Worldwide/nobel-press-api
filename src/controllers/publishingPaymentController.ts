@@ -18,6 +18,6 @@ export const getPublishingPaymentStatus = async (req: AuthRequest, res: Response
     let payment = await prisma.publishingPayment.findFirst({ where: { bookId: id }, orderBy: { id: "desc" } });
     if (payment) payment = await verifyPayment("review", payment.id);
     const fresh = await prisma.book.findUniqueOrThrow({ where: { id } });
-    return res.json({ bookId: id, bookStatus: fresh.status, payment, publishingFee: REVIEW_FEE, verification: payment?.status === "PAID" ? "verified" : "not_verified" });
+    return res.json({ bookId: id, bookPublicId: fresh.publicId, bookStatus: fresh.status, payment, publishingFee: REVIEW_FEE, verification: payment?.status === "PAID" ? "verified" : "not_verified" });
   } catch { return res.status(502).json({ message: "Payment could not be verified. Please check again before retrying payment." }); }
 };

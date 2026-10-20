@@ -12,7 +12,7 @@ export function gatewayConfigured() {
   return Boolean(process.env.PHONEPE_BASE_URL && process.env.PHONEPE_CLIENT_ID && process.env.PHONEPE_CLIENT_SECRET &&
     (process.env.PAYMENT_REDIRECT_URL || process.env.PUBLISHING_PAYMENT_REDIRECT_URL));
 }
-function redirectUrl(flow: Flow, id: number) {
+function redirectUrl(flow: Flow, id: number | string) {
   const url = new URL(process.env.PAYMENT_REDIRECT_URL || process.env.PUBLISHING_PAYMENT_REDIRECT_URL!);
   if (!["https:", "http:"].includes(url.protocol)) throw new Error("Invalid payment redirect configuration");
   url.search = "";
@@ -66,7 +66,9 @@ export async function verifyPayment(flow: Flow, paymentId: number, verifiedStatu
 
 export async function startPayment(flow: Flow, id: number, userId: number) {
   if (!gatewayConfigured()) throw new Error("Online payment is not configured. No charge was made.");
-  const returnUrl = redirectUrl(flow, id);
+  const publicBook = flow === "review" ? await prisma.book.findFirst({ where: { id, userId, deletedAt: null }, select: { publicId: true } }) : null;
+  if (flow === "review" && !publicBook) throw new Error("Book not found");
+  const returnUrl = redirectUrl(flow, publicBook?.publicId || id);
   // Verify the previous attempt before deciding whether another one is allowed.
   const previous = await model(prisma, flow).findFirst({ where: flow === "review" ? { bookId: id, userId } : { orderId: id, userId }, orderBy: { id: "desc" } });
   if (previous?.status === "PENDING" && previous.providerOrderId) await verifyPayment(flow, previous.id);

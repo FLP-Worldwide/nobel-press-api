@@ -1,0 +1,1 @@
+ALTER TABLE "Book" ADD COLUMN "titleRoman" VARCHAR(200), ADD COLUMN "authorNameRoman" VARCHAR(160);

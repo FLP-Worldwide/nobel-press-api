@@ -1,3 +1,4 @@
+import { resolveBookReference } from "../middleware/bookReference";
 import { Router } from "express";
 import {
    createBook,
@@ -25,7 +26,12 @@ import { saveCoverDesign } from "../controllers/coverDesignController";
 
 import { getPricing, publishBook } from "../controllers/pricingController";
 
+import { importManuscript } from "../controllers/manuscriptImportController";
+
 const router = Router();
+router.param("id", resolveBookReference);
+router.param("bookId", resolveBookReference);
+router.post("/:id/manuscript-import", authMiddleware, roleMiddleware("author"), importManuscript);
 router.get("/:id/pricing", authMiddleware, roleMiddleware("author", "admin"), getPricing);
 router.post("/:id/publish", authMiddleware, roleMiddleware("author"), publishBook);
 

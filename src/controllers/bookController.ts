@@ -1,3 +1,4 @@
+import { nativeTitleIssue } from "../utils/bookLanguage";
 import { withSales } from "../services/salesService";
 import { Response } from "express";
 import { Prisma } from "@prisma/client";
@@ -93,7 +94,10 @@ export const getAllBooks = async (_req: AuthRequest, res: Response) => {
       where: { status: "PUBLISHED", deletedAt: null },
       select: {
         id: true,
+        publicId: true,
         title: true,
+        titleRoman: true,
+        authorNameRoman: true,
         subheading: true,
         language: true,
         authorName: true,
@@ -128,7 +132,10 @@ export const getPublicBookById = async (req: AuthRequest, res: Response) => {
       where: { id, status: "PUBLISHED", deletedAt: null },
       select: {
         id: true,
+        publicId: true,
         title: true,
+        titleRoman: true,
+        authorNameRoman: true,
         subheading: true,
         language: true,
         authorName: true,
@@ -165,11 +172,15 @@ export const createBook = async (req: AuthRequest, res: Response) => {
     return res.status(400).json({ message: "title, language, and authorName are required" });
   }
 
+  const titleIssue = nativeTitleIssue(language,title);
+  if (titleIssue) return res.status(400).json({ message: titleIssue, code: "NATIVE_TITLE_REQUIRED" });
   try {
     const book = await prisma.book.create({
       data: {
         userId: req.userId,
         title,
+        titleRoman: cleanOptionalString(req.body?.titleRoman, 200),
+        authorNameRoman: cleanOptionalString(req.body?.authorNameRoman, 160),
         language,
         authorName,
         subheading: cleanOptionalString(req.body?.subheading, 300),
@@ -227,19 +238,33 @@ export const updateBook = async (req: AuthRequest, res: Response) => {
   if (!req.userId) return res.status(401).json({ message: "Unauthorized" });
 
   try {
-    await requireOwnedEditableBook(id, req.userId);
+    const original = await requireOwnedEditableBook(id, req.userId);
     const data: Prisma.BookUncheckedUpdateInput = {};
     const stringFields: Array<[keyof Prisma.BookUncheckedUpdateInput, number]> = [
       ["title", 200], ["subheading", 300], ["authorName", 160], ["coAuthor", 160],
+      ["titleRoman", 200], ["authorNameRoman", 160],
       ["language", 80], ["genre", 120], ["description", 5000], ["authorBiography", 3000],
+      ["copyrightHolder", 160], ["copyrightNotice", 3000],
     ];
     for (const [field, max] of stringFields) {
       const cleaned = cleanOptionalString(req.body?.[field], max);
       if (cleaned !== undefined) (data as Record<string, unknown>)[field] = cleaned;
     }
 
+    if (req.body?.copyrightYear !== undefined) {
+      const year = req.body.copyrightYear;
+      if (year !== null && (!Number.isInteger(year) || year < 1450 || year > new Date().getUTCFullYear() + 2)) {
+        return res.status(400).json({ message: "Enter a valid copyright year" });
+      }
+      data.copyrightYear = year;
+    }
+
     if (typeof data.title === "string" && !data.title) {
       return res.status(400).json({ message: "Title cannot be empty" });
+    }
+    if (typeof data.title === "string" || typeof data.language === "string") {
+      const titleIssue = nativeTitleIssue(typeof data.language === "string" ? data.language : original.language, typeof data.title === "string" ? data.title : original.title);
+      if (titleIssue) return res.status(400).json({ message: titleIssue, code: "NATIVE_TITLE_REQUIRED" });
     }
     const categories = cleanStringArray(req.body?.categories, 10, 80);
     const keywords = cleanStringArray(req.body?.keywords, 20, 80);
